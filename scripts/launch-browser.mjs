@@ -110,8 +110,9 @@ export async function launchBrowser(override = null) {
         const wsUrl = info?.webSocketDebuggerUrl;
         if (typeof wsUrl === 'string' && wsUrl.startsWith('ws://')) {
           const wsPath = new URL(wsUrl).pathname;
+          // pid 记录进 dedicated.json：专用实例死后记录成为陈旧信任的判断依据（findDedicatedInstance 会用 process.kill(pid,0) 复核）
           fs.writeFileSync(path.join(BROWSER_DIR, 'dedicated.json'),
-            JSON.stringify({ port: 9222, wsPath, confirmedAt: new Date().toISOString() }, null, 2) + '\n');
+            JSON.stringify({ port: 9222, wsPath, pid: child.pid, confirmedAt: new Date().toISOString() }, null, 2) + '\n');
           console.log('✅ 专用实例就绪（端口 9222，HTTP 探测确认）');
           return await finalizeInstance();
         }

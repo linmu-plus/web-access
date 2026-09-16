@@ -37,11 +37,18 @@ function checkEnum(key, value) {
 export function loadPermissions(filePath = CONFIG_PATH) {
   let raw = {};
   let fileMissing = false;
+  let content;
   try {
-    raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    content = fs.readFileSync(filePath, 'utf8');
   } catch (e) {
     if (e.code === 'ENOENT') { fileMissing = true; }
-    else throw new Error(`permissions.json 非法：JSON 解析失败（${e.message}）。修复文件，或删除它以使用内置默认策略。`);
+    else throw new Error(`permissions.json 非法：读取失败（${e.message}）。修复文件，或删除它以使用内置默认策略。`);
+  }
+  if (content !== undefined) {
+    try { raw = JSON.parse(content.replace(/^\uFEFF/, '')); } // 剥离 UTF-8 BOM（编辑器写 BOM 的 permissions.json 按合法 JSON 解析）
+    catch (e) {
+      throw new Error(`permissions.json 非法：JSON 解析失败（${e.message}）。修复文件，或删除它以使用内置默认策略。`);
+    }
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new Error('permissions.json 非法：顶层必须是 JSON 对象');
@@ -73,6 +80,7 @@ export function loadPermissions(filePath = CONFIG_PATH) {
   if (c.mode !== undefined) { checkEnum('confirm.mode', c.mode); cfg.confirm.mode = c.mode; } else usedDefaults.push('confirm.mode');
   if (c.hardEndpoints !== undefined) {
     if (!Array.isArray(c.hardEndpoints) || c.hardEndpoints.some(v => typeof v !== 'string')) fail('confirm.hardEndpoints 必须是字符串数组');
+    if (c.hardEndpoints.some(v => !v.startsWith('/'))) fail('confirm.hardEndpoints 每项需以 / 开头（如 "/clickAt"）');
     cfg.confirm.hardEndpoints = c.hardEndpoints;
   }
   if (c.ttlSeconds !== undefined) {

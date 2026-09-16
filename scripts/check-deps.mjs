@@ -95,7 +95,7 @@ function startProxyDetached(browserOverride) {
 }
 
 // 轮询 /targets 直到就绪或失败；带 .error 字段的 JSON（auth.mjs 的可行动中文自救信息）原文透出
-async function pollTargets(targetsUrl, healthUrl, token) {
+async function pollTargets(targetsUrl, healthUrl, token, expectedBrowserId = null) {
   for (let i = 1; i <= 15; i++) {
     const result = await httpGetJson(targetsUrl, token, 8000);
     if (Array.isArray(result)) {
@@ -111,6 +111,9 @@ async function pollTargets(targetsUrl, healthUrl, token) {
     await new Promise(r => setTimeout(r, 1000));
   }
   console.error('❌ 连接超时。日志：' + path.join(os.tmpdir(), 'cdp-proxy.log'));
+  if (expectedBrowserId === 'dedicated') {
+    console.error('❌ 专用隔离实例可能已退出（记录陈旧）。处理：重跑 node scripts/launch-browser.mjs 重建');
+  }
   return false;
 }
 
@@ -135,7 +138,7 @@ async function ensureProxy(expectedBrowserId, browserOverride) {
     if (health?.status === 'ok') {
       // proxy 活着但未连浏览器 → 不 spawn（避免端口被占导致子进程退出），直接用该 token 轮询
       console.log('proxy: 已在运行（未连接浏览器），等待连接...');
-      return pollTargets(targetsUrl, healthUrl, token);
+      return pollTargets(targetsUrl, healthUrl, token, expectedBrowserId);
     }
     if (health && health.error) {
       // 403 JSON（token 不匹配等）→ 把 auth.mjs 的自救信息原文透出
@@ -166,7 +169,7 @@ async function ensureProxy(expectedBrowserId, browserOverride) {
   startProxyDetached(browserOverride);
   const newToken = await waitForToken(8000);
   if (!newToken) { console.error('❌ proxy 未写出 token（查看 %TEMP%\\cdp-proxy.log）'); return false; }
-  return pollTargets(targetsUrl, healthUrl, newToken);
+  return pollTargets(targetsUrl, healthUrl, newToken, expectedBrowserId);
 }
 
 // --- 浏览器决策（含 strict 自动拉起） ---

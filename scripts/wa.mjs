@@ -47,8 +47,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const headers = { Authorization: `Bearer ${token}` };
   const confirm = process.env.WA_CONFIRM;
   if (confirm) headers['X-Web-Access-Confirm'] = confirm;
-  const res = await fetch(`http://127.0.0.1:${PORT}${endpoint}`, { method, headers, ...(body !== undefined ? { body } : {}) });
-  const text = await res.text();
+  let res, text;
+  try {
+    res = await fetch(`http://127.0.0.1:${PORT}${endpoint}`, { method, headers, ...(body !== undefined ? { body } : {}) });
+    text = await res.text();
+  } catch {
+    die(`连不上 proxy（127.0.0.1:${PORT}）。处理：先运行 node <skill-base-dir>/scripts/check-deps.mjs 拉起 proxy`);
+  }
   if (res.status >= 400) die(`HTTP ${res.status} ${endpoint}\n${text}`);
   console.log(text);
 }

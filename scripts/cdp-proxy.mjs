@@ -355,9 +355,17 @@ function pathDenied(p, roots) {
 }
 
 // --- 读取 POST body ---
+// 上限 1MB：认证前不消费请求体，认证后超限即断（防浏览器内恶意网页对 proxy 的内存 DoS）
+const BODY_LIMIT = 1024 * 1024;
+class BodyTooLargeError extends Error {
+  constructor() { super('请求体过大（上限 1MB）'); this.code = 'BODY_TOO_LARGE'; }
+}
 async function readBody(req) {
   let body = '';
-  for await (const chunk of req) body += chunk;
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > BODY_LIMIT) throw new BodyTooLargeError();
+  }
   return body;
 }
 
@@ -367,19 +375,33 @@ const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = parsed.pathname;
   const q = Object.fromEntries(parsed.searchParams);
-  if (q.target) touchTab(q.target);
-  const reqBody = req.method === 'POST' ? await readBody(req) : '';
+  // F2：touchTab 与 readBody 已移到 checkAuth 之后（认证前不消费任何请求体）
 
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   try {
     // --- 入口鉴权：三层校验，任一失败即 403 ---
+    // 必须先于任何请求消费（touchTab / readBody）：无 token 的恶意网页请求不读体、不碰 tab 状态（内存 DoS 面）
     const denied = checkAuth(req, TOKEN, PORT);
     if (denied) {
       audit({ endpoint: pathname, deny: denied.error });
       res.statusCode = denied.status;
       res.end(JSON.stringify({ error: denied.error }));
       return;
+    }
+    // --- 认证后才消费请求副作用与请求体 ---
+    if (q.target) touchTab(q.target);
+    let reqBody = '';
+    if (req.method === 'POST') {
+      try { reqBody = await readBody(req); }
+      catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          res.statusCode = 413;
+          res.end(JSON.stringify({ error: '请求体过大（上限 1MB）' }));
+          return;
+        }
+        throw e;
+      }
     }
     // --- 端点禁用（permissions.json endpoints，默认全开） ---
     if (PERMS.endpoints[pathname] === false) {

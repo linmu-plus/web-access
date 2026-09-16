@@ -81,6 +81,23 @@ test('旧 config.env 迁移读取', () => {
   assert.equal(migrateLegacyConfig(path.join(dir, 'nope.env')), null);
 });
 
+test('hardEndpoints 项未以 / 开头 → 硬错（fail-closed）', () => {
+  assert.throws(() => loadPermissions(tmpCfg('{"confirm":{"mode":"hard","hardEndpoints":["clickAt"]}}')), /以 \/ 开头/);
+});
+
+test('带 BOM 的合法 permissions.json → 正常解析（BOM 剥离）', () => {
+  const { cfg, fileMissing } = loadPermissions(tmpCfg('\uFEFF' + JSON.stringify({ browser: 'edge' })));
+  assert.equal(fileMissing, false);
+  assert.equal(cfg.browser, 'edge');
+});
+
+test('带 BOM 的旧 config.env → 迁移读取正常（BOM 剥离）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-mig-bom-'));
+  const legacy = path.join(dir, 'config.env');
+  fs.writeFileSync(legacy, '\uFEFFWEB_ACCESS_BROWSER=edge\n');
+  assert.equal(migrateLegacyConfig(legacy)?.value, 'edge');
+});
+
 test('profileLine 输出剖面', () => {
   const line = profileLine({ ...DEFAULTS, browser: 'chrome' });
   assert.match(line, /isolation=strict/);

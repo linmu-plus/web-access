@@ -95,10 +95,12 @@ node "<skill-base-dir>/scripts/check-deps.mjs"
 用户指向**本人访问过的页面**（"我之前看的那个讲 X 的文章"、"上次打开过的 XX 面板"）或**组织内部系统**（"我们的 XX 平台"、"公司那个 YY 系统"等公网搜不到的目标）时，检索本地浏览器（Chrome / Edge）书签/历史：
 
 ```bash
-node "<skill-base-dir>/scripts/find-url.mjs" [关键词...] [--only bookmarks|history] [--browser chrome|edge] [--limit N] [--since 1d|7h|YYYY-MM-DD] [--sort recent|visits]
+node "<skill-base-dir>/scripts/find-url.mjs" [关键词...] [--daily] [--only bookmarks|history] [--browser chrome|edge] [--limit N] [--since 1d|7h|YYYY-MM-DD] [--sort recent|visits]
 ```
 
-关键词空格分词、多词 AND，匹配 title + url（可省略）；默认遍历所有已安装的 Chromium 系浏览器（Chrome、Edge），`--browser` 限定单一来源；`--since` / `--sort` 仅作用于历史；默认按最近访问倒序，`--sort visits` 按访问次数排序（适合"高频访问的网站"这类场景）。
+isolation=strict（默认）下 find-url 只检索专用实例；显式 `--daily` 才读取日常浏览器——该操作会使你的浏览记录进入模型上下文，请视为敏感操作。
+
+关键词空格分词、多词 AND，匹配 title + url（可省略）；浏览器来源按隔离模式决定——isolation=off 时遍历所有已安装的 Chromium 系浏览器（Chrome、Edge），strict 下仅专用实例，除非 `--daily`；`--browser` 限定单一来源；`--since` / `--sort` 仅作用于历史；默认按最近访问倒序，`--sort visits` 按访问次数排序（适合"高频访问的网站"这类场景）。
 
 ### 程序化操作与 GUI 交互
 
@@ -113,7 +115,7 @@ node "<skill-base-dir>/scripts/find-url.mjs" [关键词...] [--only bookmarks|hi
 
 ## 浏览器 CDP 模式
 
-通过 CDP Proxy 直连用户日常浏览器（Chrome / Edge / Chromium 等 Chromium 系），天然携带登录态，无需启动独立浏览器。
+通过 CDP Proxy 直连浏览器（Chrome / Edge / Chromium 等 Chromium 系）——默认 strict 隔离模式下连接的是专用空实例（无你的登录态，见下）；isolation=off 时才连日常浏览器（携带其登录态）。
 若无用户明确要求，不主动操作用户已有 tab，所有操作都在自己创建的后台 tab 中进行，保持对用户环境的最小侵入。不关闭用户 tab 的前提下，完成任务后关闭自己创建的 tab，保持环境整洁。
 
 ### 启动
@@ -183,7 +185,7 @@ node "<skill-base-dir>/scripts/wa.mjs close TARGET_ID"
 登录判断的核心问题只有一个：**目标内容拿到了吗？**
 
 打开页面后先尝试获取目标内容。只有当确认**目标内容无法获取**且判断登录能解决时，才告知用户：
-> "当前页面在未登录状态下无法获取[具体内容]，请在你的浏览器中登录 [网站名]，完成后告诉我继续。"
+> "当前页面在未登录状态下无法获取[具体内容]，请在弹出的专用实例窗口中登录 [网站名]（isolation=off 时为你的日常浏览器），完成后告诉我继续。"
 
 登录完成后无需重启任何东西，直接刷新页面继续。
 
@@ -191,7 +193,7 @@ node "<skill-base-dir>/scripts/wa.mjs close TARGET_ID"
 
 用 `/close` 关闭自己创建的 tab，必须保留用户原有的 tab 不受影响。
 
-Proxy 持续运行，不建议主动停止——重启后需要在浏览器中重新授权 CDP 连接。停止 proxy 用 `stop-proxy.mjs`；修改 permissions.json 后需 stop-proxy + 重跑 check-deps 生效。
+Proxy 持续运行，不建议主动停止——重启专用实例用 stop-proxy.mjs 后重跑 check-deps.mjs。停止 proxy 用 `stop-proxy.mjs`；修改 permissions.json 后需 stop-proxy + 重跑 check-deps 生效。
 
 ## 并行调研：子 Agent 分治策略
 

@@ -72,6 +72,11 @@ export async function findDedicatedInstance(dir = BROWSER_DIR) {
   if (!Number.isInteger(port) || !(port > 0 && port < 65536)) return null;
   if (typeof wsPath !== 'string' || !wsPath || !rec.confirmedAt) return null;
   if (!(await checkPort(port))) return null;
+  // 陈旧记录防护：记录含 pid 时，TCP 活端口之外还要求进程本体存活（process.kill(pid,0)）——
+  // 专用浏览器死亡后记录持久残留，若端口被其它进程占用，无此校验会把冒名者当专用实例接受
+  if (rec.pid !== undefined && rec.pid !== null) {
+    try { process.kill(rec.pid, 0); } catch { return null; }
+  }
   return { id: 'dedicated', label: '专用隔离实例', devToolsPath: path.join(dir, 'dedicated.json'), port, wsPath, dedicatedDir: dir };
 }
 

@@ -61,6 +61,27 @@ test('dedicated.json 通道：无 DevToolsActivePort 时可发现', async () => 
   assert.equal(b.wsPath, '/devtools/browser/x');
 });
 
+test('dedicated.json 含 pid：pid 存活 → 可发现；pid 已死（陈旧记录）→ fail-closed null', async () => {
+  // 沙箱内不能 spawn 子进程（EPERM）：直接找一个 process.kill(pid,0) 确认已死的 pid（fail-closed 同一判定语义）
+  const isDeadPid = (pid) => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; } };
+  const deadPid = [999999, 9999999, 99999999, 999999999].find(isDeadPid);
+  assert.ok(deadPid, '测试前提：找到一个确认不存在的 pid');
+
+  const server = await listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-djpid-'));
+  const write = (pid) => fs.writeFileSync(path.join(dir, 'dedicated.json'),
+    JSON.stringify({ port: server.address().port, wsPath: '/devtools/browser/p', pid, confirmedAt: new Date().toISOString() }));
+  // pid 真实存活（当前测试进程）→ 正常发现
+  write(process.pid);
+  const b = await findDedicatedInstance(dir);
+  assert.ok(b, 'pid 存活的记录应正常发现');
+  assert.equal(b.port, server.address().port);
+  // pid 已死（陈旧记录）→ TCP 即使活着也 fail-closed null
+  write(deadPid);
+  assert.equal(await findDedicatedInstance(dir), null, 'pid 已死的陈旧记录必须 fail-closed 返回 null');
+  server.close();
+});
+
 test('dedicated.json 损坏 → fail-closed 返回 null', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-djbad-'));
   fs.writeFileSync(path.join(dir, 'dedicated.json'), '{ broken');
