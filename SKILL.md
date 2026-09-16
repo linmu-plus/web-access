@@ -33,10 +33,16 @@ node "<skill-base-dir>/scripts/check-deps.mjs"
 `<skill-base-dir>` 用加载本 skill 时声明的 base directory。按输出处理：
 
 - `exit 0` → 继续。输出中的 `permissions:` 行是本次会话的生效权限剖面，如实转述给用户
-- `exit 2` → isolation=off 且多浏览器未设偏好 → 询问用户，写入 permissions.json 的 `"browser"` 字段
+- `exit 2` → isolation=off 且未设置 override/configured 浏览器、检出 ≥1 个浏览器 → 询问用户，写入 permissions.json 的 `"browser"` 字段
 - `exit 1` → 按 stdout 错误信息处理；含「Agent 处理顺序」则照做，自动可解则不打扰用户
 
-**Node.js 22+** 必需。切换浏览器：`node "<skill-base-dir>/scripts/stop-proxy.mjs"` 后重跑 check-deps（**没有 pkill，这是跨平台命令**）。
+**Node.js 22+** 必需。切换浏览器：`node "<skill-base-dir>/scripts/stop-proxy.mjs"` 后重跑 check-deps（**没有 pkill，这是跨平台命令**）。支持参数 `--browser <chrome|edge>` 表达本次临时覆盖——仅 isolation=off 时生效（strict 模式只认专用实例）。
+
+检查通过后，必须在回复中直接向用户展示以下须知，再启动 CDP Proxy 执行操作：
+
+```
+温馨提示：部分站点对浏览器自动化操作检测严格，存在账号封禁风险。已内置防护措施但无法完全避免，Agent 继续操作即视为接受。
+```
 
 ## 浏览哲学
 
@@ -116,12 +122,11 @@ node "<skill-base-dir>/scripts/find-url.mjs" [关键词...] [--only bookmarks|hi
 node "<skill-base-dir>/scripts/check-deps.mjs"
 ```
 
-isolation=strict（默认）下，check-deps 会自动用 `launch-browser.mjs` 拉起**专用隔离实例**——一个空浏览器（独立 user-data-dir，无你的 Cookie/历史/密码），日常浏览器即使开了调试开关也会被硬错拒绝。需要登录的站点在这个专用实例里登录，登录完成后直接继续。任务结束不必关闭专用实例，但**绝不**在其中登录银行/支付/主邮箱。
+isolation=strict（默认）下，check-deps 会自动用 `launch-browser.mjs` 拉起**专用隔离实例**——一个空浏览器（独立 user-data-dir，无你的 Cookie/历史/密码），日常浏览器即使开了调试开关也会被完全忽略、不会连接。需要登录的站点在这个专用实例里登录，登录完成后直接继续。任务结束不必关闭专用实例，但**绝不**在其中登录银行/支付/主邮箱。
 
 ### Proxy API（经 wa.mjs，自动带鉴权）
 
 ```bash
-W='node "<skill-base-dir>/scripts/wa.mjs"'
 # 列出 tab / 健康检查
 node "<skill-base-dir>/scripts/wa.mjs" targets
 node "<skill-base-dir>/scripts/wa.mjs health"
