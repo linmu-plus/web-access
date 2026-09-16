@@ -122,10 +122,11 @@ async function ensureProxy(expectedBrowserId, browserOverride) {
   if (token) {
     const health = await httpGetJson(healthUrl, token);
     if (health?.status === 'ok' && health.connected) {
-      // 复用分支（隔离守卫生效）：proxy 已连浏览器，校验 expected vs actual
+      // 复用分支（复用守卫对称化）：期望浏览器与运行中浏览器双向比对；
+      // runningId 为 'unknown'（isolation=off 手动 fallback 端口）时无法可靠比对，豁免
       const runningId = health.browser?.id;
-      if (expectedBrowserId === 'dedicated' && runningId !== 'dedicated') {
-        console.log(`proxy: 当前连接非专用实例，需重启 —— 运行 node scripts/stop-proxy.mjs 后重跑本命令`);
+      if (expectedBrowserId && runningId && runningId !== 'unknown' && runningId !== expectedBrowserId) {
+        console.log(`proxy: 当前连接浏览器(${runningId})与期望(${expectedBrowserId})不一致，需重启 —— 运行 node scripts/stop-proxy.mjs 后重跑本命令`);
         return false;
       }
       console.log(`proxy: ready (${health.browser?.label || 'unknown'})`);
@@ -149,10 +150,19 @@ async function ensureProxy(expectedBrowserId, browserOverride) {
       }
       // 连接拒绝 → 无活 proxy → 继续启动
     }
+  } else {
+    // token 文件缺失/为空：同样先探测是否有活 proxy（活 proxy 只在 fresh listen 时写 token，
+    // 此场景下直接 spawn 的新子进程会探测到健康实例后静默退出 → 误报「未写出 token」；
+    // 且 unlink 会交错删掉新 proxy 刚写的 token，造成「活 proxy + 无 token」砖状态）
+    if (await probeAlive(healthUrl)) {
+      console.error('❌ proxy 在运行但 token 文件缺失/为空。处理：运行 node scripts/stop-proxy.mjs 后重跑 check-deps.mjs');
+      return false;
+    }
+    // 连接拒绝 → 无活 proxy → 继续启动
   }
 
   console.log('proxy: starting...');
-  try { fs.unlinkSync(TOKEN_FILE); } catch {}  // 此时已确认无活 proxy，先清掉陈旧 token（此前两处清理都只删 pid 的遗留竞态）
+  try { fs.unlinkSync(TOKEN_FILE); } catch {}  // 走到这里说明两条路径（token 有效探测失败 / token 缺失/为空探测失败）都已确认无活 proxy，清掉陈旧 token，避免误读为旧值（此前两处清理都只删 pid 的遗留竞态）
   startProxyDetached(browserOverride);
   const newToken = await waitForToken(8000);
   if (!newToken) { console.error('❌ proxy 未写出 token（查看 %TEMP%\\cdp-proxy.log）'); return false; }
