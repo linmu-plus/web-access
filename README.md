@@ -31,7 +31,7 @@ AI Agent 原本的联网能力（WebSearch、WebFetch）缺少调度策略和浏
 
 ---
 
-## v2.5.4 能力
+## v3.0.0 能力
 
 | 能力 | 说明 |
 |------|------|
@@ -42,6 +42,11 @@ AI Agent 原本的联网能力（WebSearch、WebFetch）缺少调度策略和浏
 | 并行分治 | 多目标时分发子 Agent 并行执行，共享一个 Proxy，tab 级隔离 |
 | 站点经验积累 | 按域名存储操作经验（URL 模式、平台特征、已知陷阱），跨 session 复用 |
 | 媒体提取 | 从 DOM 直取图片/视频 URL，或对视频任意时间点截帧分析 |
+
+**v3.0.0 权限模型** — 配置唯一真源为仓库根 `permissions.json`（入 git）。Proxy 启动入口带鉴权（Bearer token，存于 `%USERPROFILE%\.web-access\token`）；`isolation=strict`（默认）下连接专用隔离浏览器实例，不触碰日常浏览器；高危端点设有硬确认门（`scripts/confirm.mjs` + `WA_CONFIRM`），所有请求留有审计日志（`%USERPROFILE%\.web-access\audit.log`）。注意：Chromium 153 内核浏览器不再写 `DevToolsActivePort` 文件，专用实例记录改由 `launch-browser.mjs` 确认后写入 `%USERPROFILE%\.web-access\browser\dedicated.json`（旧文件路径仍兼容）。
+
+**v3.0.0 更新：**
+- **权限模型加固** — 专用隔离实例、入口鉴权、双档确认门与审计日志落地；配置真源迁移至 `permissions.json`
 
 **v2.5.4 更新：**
 - **修复新标签页空白竞态** — `/new` 先创建 `about:blank` 并完成 CDP attach，再显式导航；不再把浏览器初始空白文档误判为目标页面
@@ -125,34 +130,38 @@ CDP 模式需要 **Node.js 22+** 和浏览器（Chrome / Edge）开启远程调�
    - Edge：`edge://inspect/#remote-debugging`
 2. 勾选 **Allow remote debugging for this browser instance**（可能需要重启浏览器）
 
-### 浏览器偏好（config.env）
+### 浏览器偏好（permissions.json）
 
-skill 长期偏好保存在 `${CLAUDE_SKILL_DIR}/config.env`（首次运行自动从 `config.env.template` 创建，gitignored）：
+唯一配置真源是仓库根 `permissions.json`（入 git），浏览器偏好字段为 `"browser"`：
 
-```bash
-# 留空 = 每次启动都询问偏好；设值 = 固定使用该浏览器
-WEB_ACCESS_BROWSER=edge
+```json
+{
+  "browser": ""
+}
 ```
 
-合法值：`chrome` / `edge`
+- 留空 `""` = 首次使用时询问偏好；设为 `chrome` / `edge` = 固定使用该浏览器
+- 设值后未检测到该浏览器时硬错并给出处理步骤，不降级、不悄悄连别的浏览器
+- `isolation=strict`（默认）下偏好不参与解析 —— strict 只连接专用隔离实例；`--browser` 临时覆盖也仅在 `isolation=off` 时生效
 
-**临时用别的浏览器**（不修改 config.env）：
+**临时用别的浏览器**（不修改 permissions.json，仅 isolation=off 时生效）：
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/check-deps.mjs" --browser chrome
+node "<skill-base-dir>/scripts/check-deps.mjs" --browser chrome
 ```
 
 **切换浏览器**（proxy 已连接旧的）：
 
 ```bash
-pkill -f cdp-proxy.mjs && node "${CLAUDE_SKILL_DIR}/scripts/check-deps.mjs"
+node "<skill-base-dir>/scripts/stop-proxy.mjs"
+node "<skill-base-dir>/scripts/check-deps.mjs"
 ```
 
 环境检查（Agent 运行时会自动完成前置检查，无需手动执行）：
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/check-deps.mjs"
-# $CLAUDE_SKILL_DIR 是 skill 加载时自动设置的环境变量
+node "<skill-base-dir>/scripts/check-deps.mjs"
+# <skill-base-dir> 是 skill 加载时声明的 base directory
 # 手动运行请替换为实际路径，如 ~/.claude/skills/web-access
 ```
 
@@ -162,7 +171,7 @@ Proxy 通过 WebSocket 直连浏览器（兼容 `chrome://inspect` / `edge://ins
 
 ```bash
 # 启动（Agent 会自动管理 Proxy 生命周期，无需手动启动）
-node "${CLAUDE_SKILL_DIR}/scripts/cdp-proxy.mjs" &
+node "<skill-base-dir>/scripts/cdp-proxy.mjs" &
 
 # 页面操作
 curl -s -X POST --data-raw 'https://example.com' http://localhost:3456/new  # 新建 tab（v2.5.3 起 URL 走 POST body）
@@ -176,6 +185,8 @@ curl -s "http://localhost:3456/scroll?target=ID&direction=bottom"           # �
 curl -s "http://localhost:3456/close?target=ID"                             # 关闭 tab
 curl -s "http://localhost:3456/health"                                      # 查看状态（含 managedTabs 数量）
 ```
+
+> 示例省略了鉴权头；实际请求须携带 Bearer token（读取 `%USERPROFILE%\.web-access\token`），或统一走 `scripts/wa.mjs` 封装。`/clickAt`、`/setFiles` 等高危端点需先经 `scripts/confirm.mjs` 确认门放行，所有请求均记录审计日志（`%USERPROFILE%\.web-access\audit.log`）。
 
 Proxy 会自动追踪通过 `/new` 创建的 tab，闲置 15 分钟后自动关闭，防止 Agent 异常退出时留下孤儿 tab。可通过环境变量 `CDP_TAB_IDLE_TIMEOUT`（单位毫秒）调整超时时间。
 

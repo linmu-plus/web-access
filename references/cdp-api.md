@@ -1,11 +1,15 @@
 # CDP Proxy API 参考
 
+## 鉴权（v3.0.0 起强制）
+
+所有端点（含 /health）要求 `Authorization: Bearer <token>`，token 在 `%USERPROFILE%\.web-access\token`（proxy 每次启动轮换）。非本机 Host/跨站 Origin 一律 403。日常调用建议统一走 `scripts/wa.mjs`（自动带鉴权与错误透传）。变更型调用会记入 `%USERPROFILE%\.web-access\audit.log`。以下各节示例为简洁起见省略了鉴权头；实际调用须携带，或统一走 `scripts/wa.mjs`。
+
 ## 基础信息
 
-- 地址：`http://localhost:3456`
-- 启动：`node ~/.claude/skills/web-access/scripts/cdp-proxy.mjs &`
-- 启动后持续运行，不建议主动停止（重启需 Chrome 重新授权）
-- 强制停止：`pkill -f cdp-proxy.mjs`
+- 地址：`http://127.0.0.1:3456`（可用 `CDP_PROXY_PORT` 覆盖）
+- 启动：`node <skill-base-dir>/scripts/cdp-proxy.mjs`（通常由 `check-deps.mjs` 自动拉起）
+- 启动后持续运行；强制停止：`node <skill-base-dir>/scripts/stop-proxy.mjs`
+- 专用实例发现：Chromium 153 内核浏览器不再写 `DevToolsActivePort` 文件，专用实例记录改由 `launch-browser.mjs` 确认后写入 `%USERPROFILE%\.web-access\browser\dedicated.json`（旧文件路径仍兼容）
 
 ## API 端点
 

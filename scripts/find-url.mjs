@@ -24,10 +24,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { BROWSER_DIR } from './paths.mjs';
+import { loadPermissions } from './permissions.mjs';
+import { pathToFileURL } from 'node:url';
 
 // --- 参数解析 -----------------------------------------------------------
 function parseArgs(argv) {
-  const a = { keywords: [], only: null, browser: null, limit: 20, since: null, sort: 'recent' };
+  const a = { keywords: [], only: null, browser: null, limit: 20, since: null, sort: 'recent', daily: false };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
     if (v === '--only')         a.only    = argv[++i];
@@ -35,6 +38,7 @@ function parseArgs(argv) {
     else if (v === '--limit')   a.limit   = parseInt(argv[++i], 10);
     else if (v === '--since')   a.since   = parseSince(argv[++i]);
     else if (v === '--sort')    a.sort    = argv[++i];
+    else if (v === '--daily')   a.daily   = true;
     else if (v === '-h' || v === '--help') { printUsage(); process.exit(0); }
     else if (v.startsWith('--')) die(`未知参数: ${v}`);
     else a.keywords.push(v);
@@ -127,6 +131,7 @@ function searchBookmarks(profileDir, profileName, browserLabel, keywords) {
 
 // --- 历史检索（SQLite 运行时锁定，需 copy 到 tmp） ------------------------
 const WEBKIT_EPOCH_DIFF_US = 11644473600000000n;  // 1601→1970 微秒差
+const historyErrors = [];
 
 function searchHistory(profileDir, profileName, browserLabel, keywords, since, limit, sort) {
   const src = path.join(profileDir, 'History');
@@ -159,7 +164,8 @@ function searchHistory(profileDir, profileName, browserLabel, keywords, since, l
       return { browser: browserLabel, profile: profileName, title, url, visit, visit_count: parseInt(visit_count, 10) };
     });
   } catch (e) {
-    if (e.code === 'ENOENT') die('未找到 sqlite3 命令。macOS/Linux 通常自带；Windows 可用 `winget install sqlite.sqlite` 或从 https://sqlite.org/download.html 下载后加入 PATH。');
+    if (e.code === 'ENOENT') historyErrors.push('未找到 sqlite3 命令。Windows: winget install sqlite.sqlite；或改用 --only bookmarks');
+    else historyErrors.push(`历史查询失败（${browserLabel}/${profileName}）：${e.message}`);
     return [];
   } finally {
     try { fs.unlinkSync(tmp); } catch {}
@@ -200,18 +206,42 @@ function printHistory(items, showBrowser, showProfile, sortLabel) {
 }
 
 // --- main ---------------------------------------------------------------
-const args = parseArgs(process.argv.slice(2));
-
-let browsers = knownBrowserDataDirs().filter(b => fs.existsSync(b.dir));
-if (args.browser) {
-  const filtered = browsers.filter(b => b.id === args.browser);
-  if (!filtered.length) {
-    const available = browsers.map(b => b.id).join('、') || '无';
-    die(`未找到浏览器 ${args.browser} 的用户数据目录（已检测到：${available}）`);
+// 数据目录解析的纯决策层（spec §10 单测面）：strict → 只读专用隔离实例；daily/off → 日常目录。
+// BROWSER_DIR 与两条 stderr 提示是分支行为的一部分，留在函数内；
+// --browser 过滤与空目录 die 属 CLI 层，留在调用方。
+export function resolveBrowserDirs({ isolation, daily }) {
+  if (isolation === 'strict' && !daily) {
+    console.error('[隔离模式] 只检索专用实例（%USERPROFILE%\\.web-access\\browser）。查日常浏览器需显式 --daily。');
+    return [{ id: 'dedicated', label: '专用隔离实例', dir: BROWSER_DIR }];
   }
-  browsers = filtered;
+  if (daily) console.error('⚠️  --daily：将读取日常浏览器历史/书签，其内容会进入模型上下文。');
+  return knownBrowserDataDirs().filter(b => fs.existsSync(b.dir));
 }
-if (!browsers.length) die('未找到任何浏览器（Chrome / Edge）的用户数据目录');
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  let perms;
+  try {
+    perms = loadPermissions().cfg;
+  } catch (e) {
+    // fail-closed：permissions.json 非法时输出单行可行动错误，不裸抛堆栈
+    console.error(`❌ ${e.message}`);
+    process.exit(1);
+  }
+
+  let browsers;
+  if (perms.isolation === 'strict' && !args.daily) {
+    browsers = resolveBrowserDirs({ isolation: perms.isolation, daily: args.daily });
+  } else {
+    browsers = resolveBrowserDirs({ isolation: perms.isolation, daily: args.daily });
+    if (args.browser) {
+      const filtered = browsers.filter(b => b.id === args.browser);
+      if (!filtered.length) die(`未找到浏览器 ${args.browser} 的用户数据目录（已检测到：${browsers.map(b => b.id).join('、') || '无'}）`);
+      browsers = filtered;
+    }
+    if (!browsers.length) die('未找到任何浏览器（Chrome / Edge）的用户数据目录');
+  }
 
 const doBookmarks = args.only !== 'history';
 const doHistory   = args.only !== 'bookmarks';
@@ -248,6 +278,13 @@ if (doBookmarks) printBookmarks(bookmarksOut, showBrowser, showProfile);
 if (doBookmarks && doHistory) console.log();
 if (doHistory)   printHistory(historyOut, showBrowser, showProfile, sortLabel);
 
+for (const err of historyErrors) console.error(`[历史查询失败] ${err}`);
+
 if (!args.keywords.length && doBookmarks && !doHistory) {
   console.error('\n提示：书签无时间维度，无关键词查询无意义。加关键词或切换 --only history。');
 }
+// main 函数体沿用原 main 段落缩进，控制 diff 范围
+}
+
+// 仅直接执行时跑 main；作为模块导入（单测）只取导出的纯决策函数
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
