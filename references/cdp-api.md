@@ -1,5 +1,9 @@
 # CDP Proxy API 参考
 
+## 鉴权（v3.0.0 起强制）
+
+所有端点（含 /health）要求 `Authorization: Bearer <token>`，token 在 `%USERPROFILE%\.web-access\token`（proxy 每次启动轮换）。非本机 Host/跨站 Origin 一律 403。日常调用建议统一走 `scripts/wa.mjs`（自动带鉴权与错误透传）。变更型调用会记入 `%USERPROFILE%\.web-access\audit.log`。
+
 ## 基础信息
 
 - 地址：`http://localhost:3456`
