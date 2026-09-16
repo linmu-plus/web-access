@@ -43,7 +43,7 @@ AI Agent 原本的联网能力（WebSearch、WebFetch）缺少调度策略和浏
 | 站点经验积累 | 按域名存储操作经验（URL 模式、平台特征、已知陷阱），跨 session 复用 |
 | 媒体提取 | 从 DOM 直取图片/视频 URL，或对视频任意时间点截帧分析 |
 
-**v3.0.0 权限模型** — 配置唯一真源为仓库根 `permissions.json`（入 git）。Proxy 启动入口带鉴权（Bearer token，存于 `%USERPROFILE%\.web-access\token`）；`isolation=strict`（默认）下连接专用隔离浏览器实例，不触碰日常浏览器；高危端点设有硬确认门（`scripts/confirm.mjs` + `WA_CONFIRM`），所有请求留有审计日志（`%USERPROFILE%\.web-access\audit.log`）。
+**v3.0.0 权限模型** — 配置唯一真源为仓库根 `permissions.json`（入 git）。Proxy 启动入口带鉴权（Bearer token，存于 `%USERPROFILE%\.web-access\token`）；`isolation=strict`（默认）下连接专用隔离浏览器实例，不触碰日常浏览器；高危端点设有硬确认门（`scripts/confirm.mjs` + `WA_CONFIRM`），所有请求留有审计日志（`%USERPROFILE%\.web-access\audit.log`）。注意：Chromium 153 内核浏览器不再写 `DevToolsActivePort` 文件，专用实例记录改由 `launch-browser.mjs` 确认后写入 `%USERPROFILE%\.web-access\browser\dedicated.json`（旧文件路径仍兼容）。
 
 **v3.0.0 更新：**
 - **权限模型加固** — 专用隔离实例、入口鉴权、双档确认门与审计日志落地；配置真源迁移至 `permissions.json`

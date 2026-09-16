@@ -49,6 +49,24 @@ test('strict 模式：专用实例存在 → ok，source=dedicated', async () =>
   server.close();
 });
 
+test('dedicated.json 通道：无 DevToolsActivePort 时可发现', async () => {
+  const server = await listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-dj-'));
+  fs.writeFileSync(path.join(dir, 'dedicated.json'),
+    JSON.stringify({ port: server.address().port, wsPath: '/devtools/browser/x', confirmedAt: new Date().toISOString() }));
+  const b = await findDedicatedInstance(dir);
+  server.close();
+  assert.ok(b, '应通过 dedicated.json 发现专用实例');
+  assert.equal(b.id, 'dedicated');
+  assert.equal(b.wsPath, '/devtools/browser/x');
+});
+
+test('dedicated.json 损坏 → fail-closed 返回 null', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-djbad-'));
+  fs.writeFileSync(path.join(dir, 'dedicated.json'), '{ broken');
+  assert.equal(await findDedicatedInstance(dir), null);
+});
+
 test('knownBrowsers 每项都带 exePaths 非空数组', () => {
   for (const b of knownBrowsers()) assert.ok(Array.isArray(b.exePaths) && b.exePaths.length > 0, `${b.id} 缺 exePaths`);
 });

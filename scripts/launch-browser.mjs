@@ -50,15 +50,33 @@ export async function launchBrowser(override = null) {
   ], { detached: true, stdio: 'ignore', ...(os.platform() === 'win32' ? { windowsHide: false } : {}) });
   child.unref();
 
+  // 就绪判定双通道（任一满足即就绪）：
+  // 1) 旧路径：DevToolsActivePort 文件存在且首行端口 >0（兼容旧内核浏览器）
+  // 2) 新路径：HTTP 探测 /json/version —— Chromium 153 内核不再写 DevToolsActivePort，
+  //    改由这里确认后写入 dedicated.json（自建记录，供 findDedicatedInstance 发现）
   const portFile = path.join(BROWSER_DIR, 'DevToolsActivePort');
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 120; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
       const port = parseInt(fs.readFileSync(portFile, 'utf8').trim().split(/\r?\n/)[0], 10);
       if (port > 0) { console.log(`✅ 专用实例就绪（端口 ${port}）`); return await findDedicatedInstance(); }
     } catch { /* 尚未就绪 */ }
+    try {
+      const res = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const info = await res.json();
+        const wsUrl = info?.webSocketDebuggerUrl;
+        if (typeof wsUrl === 'string' && wsUrl.startsWith('ws://')) {
+          const wsPath = new URL(wsUrl).pathname;
+          fs.writeFileSync(path.join(BROWSER_DIR, 'dedicated.json'),
+            JSON.stringify({ port: 9222, wsPath, confirmedAt: new Date().toISOString() }, null, 2) + '\n');
+          console.log('✅ 专用实例就绪（端口 9222，HTTP 探测确认）');
+          return await findDedicatedInstance();
+        }
+      }
+    } catch { /* HTTP 探测失败，继续轮询 */ }
   }
-  die('30 秒内专用实例未就绪（DevToolsActivePort 未生成）。若浏览器已弹出窗口，稍后重跑本命令。');
+  die('60 秒内专用实例未就绪（DevToolsActivePort 未生成且调试端口 HTTP 探测无响应）。若浏览器已弹出窗口，稍后重跑本命令。');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -9,6 +9,7 @@
 - 地址：`http://127.0.0.1:3456`（可用 `CDP_PROXY_PORT` 覆盖）
 - 启动：`node <skill-base-dir>/scripts/cdp-proxy.mjs`（通常由 `check-deps.mjs` 自动拉起）
 - 启动后持续运行；强制停止：`node <skill-base-dir>/scripts/stop-proxy.mjs`
+- 专用实例发现：Chromium 153 内核浏览器不再写 `DevToolsActivePort` 文件，专用实例记录改由 `launch-browser.mjs` 确认后写入 `%USERPROFILE%\.web-access\browser\dedicated.json`（旧文件路径仍兼容）
 
 ## API 端点
 
