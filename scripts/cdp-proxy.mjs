@@ -84,7 +84,7 @@ async function discoverChromePort() {
     }
     pinnedBrowserId = result.browser.id;
     connectedBrowser = { id: result.browser.id, label: result.browser.label, source: result.source };
-    const tag = result.source === 'override' ? '[--browser 指定]' : '[config.env 偏好]';
+    const tag = { override: '[--browser 指定]', preference: '[permissions.json 偏好]', dedicated: '[专用隔离实例]' }[result.source] || '';
     console.log(`[CDP Proxy] 选用 ${result.browser.label} (端口 ${result.browser.port}${result.browser.wsPath ? '，带 wsPath' : ''}) ${tag}`);
     return { port: result.browser.port, wsPath: result.browser.wsPath };
   }
