@@ -24,9 +24,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { BROWSER_DIR } from './paths.mjs';
+import { BROWSER_DIR, isMainEntry } from './paths.mjs';
 import { loadPermissions } from './permissions.mjs';
-import { pathToFileURL } from 'node:url';
 
 // --- 参数解析 -----------------------------------------------------------
 function parseArgs(argv) {
@@ -287,4 +286,4 @@ if (!args.keywords.length && doBookmarks && !doHistory) {
 }
 
 // 仅直接执行时跑 main；作为模块导入（单测）只取导出的纯决策函数
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainEntry(import.meta.url)) main();

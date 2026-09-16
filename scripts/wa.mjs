@@ -3,8 +3,7 @@
 // 用法：node wa.mjs <endpoint> [args...]   （endpoint 列表见 SKILL.md「Proxy API」节）
 // 确认门：confirm.mode=hard 时先由用户运行 confirm.mjs，再以 WA_CONFIRM=<code> 环境变量调用
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
-import { TOKEN_FILE } from './paths.mjs';
+import { isMainEntry, TOKEN_FILE } from './paths.mjs';
 
 const PORT = process.env.CDP_PROXY_PORT || 3456;
 const POST_ENDPOINTS = new Set(['new', 'navigate', 'eval', 'click', 'clickAt', 'setFiles']);
@@ -37,7 +36,7 @@ export function buildRequest(argv) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainEntry(import.meta.url)) {
   let req;
   try { req = buildRequest(process.argv.slice(2)); } catch (e) { die(e.message); }
   const { method, endpoint, body } = req;
