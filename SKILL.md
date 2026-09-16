@@ -33,10 +33,10 @@ node "<skill-base-dir>/scripts/check-deps.mjs"
 `<skill-base-dir>` 用加载本 skill 时声明的 base directory。按输出处理：
 
 - `exit 0` → 继续。输出中的 `permissions:` 行是本次会话的生效权限剖面，如实转述给用户
-- `exit 2` → isolation=off 且未设置 override/configured 浏览器、检出 ≥1 个浏览器 → 询问用户，写入 permissions.json 的 `"browser"` 字段
+- `exit 2` → 需询问用户决策，写入 permissions.json 的 `"browser"` 字段。两种情形：① isolation=off 且未设 override/偏好、检出 ≥1 个浏览器；② isolation=strict 且专用实例未运行、未设 `browser` 偏好（询问专用实例用哪个浏览器起，chrome / edge）
 - `exit 1` → 按 stdout 错误信息处理；含「Agent 处理顺序」则照做，自动可解则不打扰用户
 
-**Node.js 22+** 必需。切换浏览器：`node "<skill-base-dir>/scripts/stop-proxy.mjs"` 后重跑 check-deps（**没有 pkill，这是跨平台命令**）。支持参数 `--browser <chrome|edge>` 表达本次临时覆盖——仅 isolation=off 时生效（strict 模式只认专用实例）。
+**Node.js 22+** 必需。切换浏览器：`node "<skill-base-dir>/scripts/stop-proxy.mjs"` 后重跑 check-deps（**没有 pkill，这是跨平台命令**）。支持参数 `--browser <chrome|edge>` 表达本次临时覆盖——isolation=off 时选择连接哪个日常浏览器；strict 下为专用实例选择用哪个浏览器起。
 
 检查通过后，必须在回复中直接向用户展示以下须知，再启动 CDP Proxy 执行操作：
 

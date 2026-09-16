@@ -182,6 +182,14 @@ async function resolveBrowser(override, cfg) {
       return { proceed: true, browserId: result.browser.id };
     }
     case 'no-dedicated': {
+      // 专用实例要用哪个浏览器起，是需要用户决策且应持久化到 permissions.json 的偏好：
+      // 没有任何决策依据（无 --browser override、config 无 browser）时询问而非擅自选择。
+      if (!override && !cfg.browser) {
+        console.log('browser: needs decision — 专用隔离实例未运行，且未设浏览器偏好。');
+        console.log('  请询问用户：专用实例用哪个浏览器？写入 permissions.json 的 "browser" 字段（chrome / edge）。');
+        console.log('  若仅本次使用，可运行：node scripts/check-deps.mjs --browser <chrome|edge>');
+        return { proceed: false, exitCode: 2 };
+      }
       console.log('browser: 专用隔离实例未运行，正在启动...');
       const inst = await launchBrowser(override);
       if (!inst) return { proceed: false, exitCode: 1 };
