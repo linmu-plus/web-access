@@ -49,6 +49,20 @@ export function loadPermissions(filePath = CONFIG_PATH) {
   const unknown = Object.keys(raw).filter(k => !(k in DEFAULTS));
   if (unknown.length) fail(`未知顶层字段 ${unknown.join(', ')}（合法：${Object.keys(DEFAULTS).join('、')}）`);
 
+  // 嵌套段（confirm/domains/paths）：类型校验 + 未知键校验，均先于值校验（fail-closed）
+  const SEGMENTS = {
+    confirm: ['mode', 'hardEndpoints', 'ttlSeconds'],
+    domains: ['mode', 'allow', 'block'],
+    paths: ['screenshotRoot', 'setFilesRoots'],
+  };
+  for (const [seg, allowed] of Object.entries(SEGMENTS)) {
+    const v = raw[seg];
+    if (v === undefined) continue;
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) fail(`${seg} 必须是对象`);
+    const unknownKeys = Object.keys(v).filter(k => !allowed.includes(k));
+    if (unknownKeys.length) fail(`未知嵌套字段 ${seg}.${unknownKeys.join(', ')}（合法：${allowed.join('、')}）`);
+  }
+
   const usedDefaults = [];
   const cfg = structuredClone(DEFAULTS);
 

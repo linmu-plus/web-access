@@ -62,6 +62,17 @@ test('endpoints / paths 校验', () => {
   assert.equal(cfg.endpoints['/setFiles'], false);
 });
 
+test('嵌套段类型错误 → 硬错', () => {
+  assert.throws(() => loadPermissions(tmpCfg('{"confirm":"hard"}')), /confirm/);
+  assert.throws(() => loadPermissions(tmpCfg('{"domains":"allowlist"}')), /domains/);
+  assert.throws(() => loadPermissions(tmpCfg('{"paths":5}')), /paths/);
+});
+
+test('未知嵌套字段 → 硬错', () => {
+  assert.throws(() => loadPermissions(tmpCfg('{"confirm":{"mode":"soft","ttlSecond":5}}')), /ttlSecond/);
+  assert.throws(() => loadPermissions(tmpCfg('{"paths":{"setFilesRoot":"C:/"}}')), /setFilesRoot/);
+});
+
 test('旧 config.env 迁移读取', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-mig-'));
   const legacy = path.join(dir, 'config.env');
