@@ -26,6 +26,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { BROWSER_DIR } from './paths.mjs';
 import { loadPermissions } from './permissions.mjs';
+import { pathToFileURL } from 'node:url';
 
 // --- 参数解析 -----------------------------------------------------------
 function parseArgs(argv) {
@@ -205,23 +206,42 @@ function printHistory(items, showBrowser, showProfile, sortLabel) {
 }
 
 // --- main ---------------------------------------------------------------
-const args = parseArgs(process.argv.slice(2));
-
-const { cfg: perms } = loadPermissions();
-let browsers;
-if (perms.isolation === 'strict' && !args.daily) {
-  browsers = [{ id: 'dedicated', label: '专用隔离实例', dir: BROWSER_DIR }];
-  console.error('[隔离模式] 只检索专用实例（%USERPROFILE%\\.web-access\\browser）。查日常浏览器需显式 --daily。');
-} else {
-  if (args.daily) console.error('⚠️  --daily：将读取日常浏览器历史/书签，其内容会进入模型上下文。');
-  browsers = knownBrowserDataDirs().filter(b => fs.existsSync(b.dir));
-  if (args.browser) {
-    const filtered = browsers.filter(b => b.id === args.browser);
-    if (!filtered.length) die(`未找到浏览器 ${args.browser} 的用户数据目录（已检测到：${browsers.map(b => b.id).join('、') || '无'}）`);
-    browsers = filtered;
+// 数据目录解析的纯决策层（spec §10 单测面）：strict → 只读专用隔离实例；daily/off → 日常目录。
+// BROWSER_DIR 与两条 stderr 提示是分支行为的一部分，留在函数内；
+// --browser 过滤与空目录 die 属 CLI 层，留在调用方。
+export function resolveBrowserDirs({ isolation, daily }) {
+  if (isolation === 'strict' && !daily) {
+    console.error('[隔离模式] 只检索专用实例（%USERPROFILE%\\.web-access\\browser）。查日常浏览器需显式 --daily。');
+    return [{ id: 'dedicated', label: '专用隔离实例', dir: BROWSER_DIR }];
   }
-  if (!browsers.length) die('未找到任何浏览器（Chrome / Edge）的用户数据目录');
+  if (daily) console.error('⚠️  --daily：将读取日常浏览器历史/书签，其内容会进入模型上下文。');
+  return knownBrowserDataDirs().filter(b => fs.existsSync(b.dir));
 }
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  let perms;
+  try {
+    perms = loadPermissions().cfg;
+  } catch (e) {
+    // fail-closed：permissions.json 非法时输出单行可行动错误，不裸抛堆栈
+    console.error(`❌ ${e.message}`);
+    process.exit(1);
+  }
+
+  let browsers;
+  if (perms.isolation === 'strict' && !args.daily) {
+    browsers = resolveBrowserDirs({ isolation: perms.isolation, daily: args.daily });
+  } else {
+    browsers = resolveBrowserDirs({ isolation: perms.isolation, daily: args.daily });
+    if (args.browser) {
+      const filtered = browsers.filter(b => b.id === args.browser);
+      if (!filtered.length) die(`未找到浏览器 ${args.browser} 的用户数据目录（已检测到：${browsers.map(b => b.id).join('、') || '无'}）`);
+      browsers = filtered;
+    }
+    if (!browsers.length) die('未找到任何浏览器（Chrome / Edge）的用户数据目录');
+  }
 
 const doBookmarks = args.only !== 'history';
 const doHistory   = args.only !== 'bookmarks';
@@ -263,3 +283,8 @@ for (const err of historyErrors) console.error(`[历史查询失败] ${err}`);
 if (!args.keywords.length && doBookmarks && !doHistory) {
   console.error('\n提示：书签无时间维度，无关键词查询无意义。加关键词或切换 --only history。');
 }
+// main 函数体沿用原 main 段落缩进，控制 diff 范围
+}
+
+// 仅直接执行时跑 main；作为模块导入（单测）只取导出的纯决策函数
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
