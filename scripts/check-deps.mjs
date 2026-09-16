@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureRuntimeDir, TOKEN_FILE } from './paths.mjs';
 import { selectBrowser, knownBrowsers } from './browser-discovery.mjs';
 import { launchBrowser } from './launch-browser.mjs';
-import { loadPermissions, migrateLegacyConfig, profileLine, LEGACY_CONFIG_PATH } from './permissions.mjs';
+import { loadPermissions, migrateLegacyConfig, profileLine } from './permissions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROXY_SCRIPT = path.join(ROOT, 'scripts', 'cdp-proxy.mjs');
@@ -61,6 +61,11 @@ async function waitForToken(ms = 8000) {
   return null;
 }
 
+// 真读一次 token 文件（替代恒返回 null 的 waitForToken(0)）
+function readTokenFile() {
+  try { const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); return t || null; } catch { return null; }
+}
+
 function httpGetJson(url, token, timeoutMs = 3000) {
   return fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -68,10 +73,18 @@ function httpGetJson(url, token, timeoutMs = 3000) {
   }).then(async (res) => { try { return JSON.parse(await res.text()); } catch { return null; } }).catch(() => null);
 }
 
+// 无鉴权探测：只要端口上返回了任何 HTTP 响应（如 403）即说明有活的 HTTP 服务；
+// 连接被拒/超时（fetch throw）才视为无活 proxy。
+function probeAlive(url) {
+  return fetch(url, { signal: AbortSignal.timeout(2000) })
+    .then(async (res) => { try { await res.text(); } catch {} return true; })
+    .catch(() => false);
+}
+
 function startProxyDetached(browserOverride) {
   const logFile = path.join(os.tmpdir(), 'cdp-proxy.log');
   const logFd = fs.openSync(logFile, 'a');
-  const args = [path.join(ROOT, 'scripts', 'cdp-proxy.mjs')];
+  const args = [PROXY_SCRIPT];
   if (browserOverride) args.push('--browser', browserOverride);
   const child = spawn(process.execPath, args, {
     detached: true, stdio: ['ignore', logFd, logFd],
@@ -81,14 +94,35 @@ function startProxyDetached(browserOverride) {
   fs.closeSync(logFd);
 }
 
+// 轮询 /targets 直到就绪或失败；带 .error 字段的 JSON（auth.mjs 的可行动中文自救信息）原文透出
+async function pollTargets(targetsUrl, healthUrl, token) {
+  for (let i = 1; i <= 15; i++) {
+    const result = await httpGetJson(targetsUrl, token, 8000);
+    if (Array.isArray(result)) {
+      const h = await httpGetJson(healthUrl, token);
+      console.log(`proxy: ready (${h?.browser?.label || 'unknown'})`);
+      return true;
+    }
+    if (result && typeof result === 'object' && result.error) {
+      console.error('❌ proxy 拒绝请求：' + result.error);
+      return false;
+    }
+    if (i === 1) console.log('⚠️  等待浏览器连接中（专用实例若未启动会被自动拉起）...');
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.error('❌ 连接超时。日志：' + path.join(os.tmpdir(), 'cdp-proxy.log'));
+  return false;
+}
+
 async function ensureProxy(expectedBrowserId, browserOverride) {
-  let token = await waitForToken(0);
   const healthUrl = `http://127.0.0.1:${PROXY_PORT}/health`;
   const targetsUrl = `http://127.0.0.1:${PROXY_PORT}/targets`;
 
+  const token = readTokenFile();
   if (token) {
     const health = await httpGetJson(healthUrl, token);
     if (health?.status === 'ok' && health.connected) {
+      // 复用分支（隔离守卫生效）：proxy 已连浏览器，校验 expected vs actual
       const runningId = health.browser?.id;
       if (expectedBrowserId === 'dedicated' && runningId !== 'dedicated') {
         console.log(`proxy: 当前连接非专用实例，需重启 —— 运行 node scripts/stop-proxy.mjs 后重跑本命令`);
@@ -97,25 +131,32 @@ async function ensureProxy(expectedBrowserId, browserOverride) {
       console.log(`proxy: ready (${health.browser?.label || 'unknown'})`);
       return true;
     }
+    if (health?.status === 'ok') {
+      // proxy 活着但未连浏览器 → 不 spawn（避免端口被占导致子进程退出），直接用该 token 轮询
+      console.log('proxy: 已在运行（未连接浏览器），等待连接...');
+      return pollTargets(targetsUrl, healthUrl, token);
+    }
+    if (health && health.error) {
+      // 403 JSON（token 不匹配等）→ 把 auth.mjs 的自救信息原文透出
+      console.error('❌ proxy /health 鉴权失败：' + health.error);
+      return false;
+    }
+    if (health === null) {
+      // fetch 失败：区分「proxy 活着但我们没有有效 token」与「无活 proxy」
+      if (await probeAlive(healthUrl)) {
+        console.error('❌ token 文件与运行中的 proxy 不匹配。处理：运行 node scripts/stop-proxy.mjs 后重跑 check-deps.mjs');
+        return false;
+      }
+      // 连接拒绝 → 无活 proxy → 继续启动
+    }
   }
 
   console.log('proxy: starting...');
+  try { fs.unlinkSync(TOKEN_FILE); } catch {}  // 此时已确认无活 proxy，先清掉陈旧 token（此前两处清理都只删 pid 的遗留竞态）
   startProxyDetached(browserOverride);
-  token = await waitForToken(8000);
-  if (!token) { console.error('❌ proxy 未写出 token（查看 %TEMP%\\cdp-proxy.log）'); return false; }
-
-  for (let i = 1; i <= 15; i++) {
-    const result = await httpGetJson(targetsUrl, token, 8000);
-    if (Array.isArray(result)) {
-      const h = await httpGetJson(healthUrl, token);
-      console.log(`proxy: ready (${h?.browser?.label || 'unknown'})`);
-      return true;
-    }
-    if (i === 1) console.log('⚠️  等待浏览器连接中（专用实例若未启动会被自动拉起）...');
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  console.error('❌ 连接超时。日志：' + path.join(os.tmpdir(), 'cdp-proxy.log'));
-  return false;
+  const newToken = await waitForToken(8000);
+  if (!newToken) { console.error('❌ proxy 未写出 token（查看 %TEMP%\\cdp-proxy.log）'); return false; }
+  return pollTargets(targetsUrl, healthUrl, newToken);
 }
 
 // --- 浏览器决策（含 strict 自动拉起） ---
