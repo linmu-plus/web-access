@@ -1,0 +1,8 @@
+{
+  "browser": "",
+  "isolation": "strict",
+  "confirm": { "mode": "soft", "hardEndpoints": ["/clickAt", "/setFiles"], "ttlSeconds": 120 },
+  "domains": { "mode": "off", "allow": [], "block": [] },
+  "endpoints": {},
+  "paths": { "screenshotRoot": "", "setFilesRoots": [] }
+}
