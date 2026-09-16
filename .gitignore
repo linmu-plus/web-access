@@ -3,3 +3,5 @@
 references/site-patterns/*.md
 config.env
 .claude/
+
+.superpowers/
