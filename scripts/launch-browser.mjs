@@ -41,6 +41,10 @@ export function detectImportArtifacts(browserDir) {
   if (fs.existsSync(path.join(browserDir, 'Default', 'Bookmarks'))) {
     hits.push('Bookmarks 文件已存在（首启导入的书签副本，全新 profile 不会有此文件）');
   }
+  // 注意：Default\Extensions 目录**不算**导入污染——机器上装有 IDM/迅雷等下载管理器时，
+  // 其扩展会经机器级注册表/external_extensions.json 被注入任何新 profile，即使加了
+  // --disable-extensions 文件仍会落盘（但不会注册加载：Preferences 无 settings 条目）。
+  // 这是系统级已知行为，按已知噪音忽略，不再作为 kill+purge 依据。
   let prefs = null;
   try { prefs = JSON.parse(fs.readFileSync(path.join(browserDir, 'Default', 'Preferences'), 'utf8')); } catch { prefs = null; }
   const accounts = prefs?.signin?.accounts_metadata_dict;
@@ -178,6 +182,13 @@ export async function launchBrowser(override = null) {
     // 防隐式登录/同步邀请（OS 级账号注入邀请不被空 user-data-dir 挡住）
     '--disable-sync',
     '--disable-features=msImplicitSignin,ImplicitSignin',
+    // 已知系统级行为：IDM/迅雷等下载管理器经 Chrome 安装目录 external_extensions.json 与
+    // 注册表（HKLM\Software\[WOW6432Node\]Google\Chrome\Extensions）被机器级注入任何新
+    // profile——实测 --disable-extensions 不能阻止其扩展文件落盘（Chromium 外部扩展
+    // provider 照常解包），但会阻止注册加载：Preferences 无 settings 条目，chrome://extensions
+    // 不可见，即「文件在磁盘、不运行」。按已知噪音接受；如需在专用实例手动装扩展，需去掉
+    // 本参数重启（副作用：chrome://extensions 将不可用）。
+    '--disable-extensions',
   ], { detached: true, stdio: 'ignore', ...(os.platform() === 'win32' ? { windowsHide: false } : {}) });
   child.unref();
 

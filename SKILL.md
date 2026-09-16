@@ -126,6 +126,8 @@ node "<skill-base-dir>/scripts/check-deps.mjs"
 
 isolation=strict（默认）下，check-deps 会自动用 `launch-browser.mjs` 拉起**专用隔离实例**——一个空浏览器（独立 user-data-dir，无你的 Cookie/历史/密码），日常浏览器即使开了调试开关也会被完全忽略、不会连接。需要登录的站点在这个专用实例里登录，登录完成后直接继续。任务结束不必关闭专用实例，但**绝不**在其中登录银行/支付/主邮箱。
 
+**已知系统级噪音（非本 skill 引入，勿误判）**：机器上装有 IDM、迅雷等下载管理器时，其扩展会经 Chrome 安装目录的 `external_extensions.json` 与机器级注册表（`HKLM\Software\[WOW6432Node\]Google\Chrome\Extensions`）被注入**任何**新 profile——专用实例也不例外，且浏览器开关无法阻止注入。本 skill 以 `--disable-extensions` 保证这些扩展**不被注册加载**（实测：扩展文件会落盘到 `Default\Extensions`，但 Preferences 无 settings 条目、`chrome://extensions` 不可见，即"文件在磁盘、不运行"）。若确实需要在专用实例里使用扩展，需去掉 `--disable-extensions` 参数重启专用实例（副作用：`chrome://extensions` 管理页将不可用）。
+
 ### Proxy API（经 wa.mjs，自动带鉴权）
 
 ```bash
