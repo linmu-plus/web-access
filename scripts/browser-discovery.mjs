@@ -1,90 +1,106 @@
 // 浏览器 CDP 端口发现 + 选择 - 单一职责模块
-// 被 check-deps.mjs 和 cdp-proxy.mjs 共享。
-//
-// 选择规则（resolution）：
-//   1. 调用方传入 override 参数（来自命令行 --browser） → 严格模式，找不到则硬错
-//   2. config.env 里 WEB_ACCESS_BROWSER 设了 → 严格模式，找不到则硬错
-//   3. 都没设 → "ask" 模式，提示调用方询问用户
-//
-// 不擅自降级：偏好不可用一律硬错，让用户介入。
-// 持久态只有 config.env 一处；override 是单次 spawn 通过命令行参数表达，不读 process.env。
-
+// 被 cdp-proxy.mjs / check-deps.mjs / launch-browser.mjs 共享
+// isolation=strict（默认策略）：只认 %USERPROFILE%\.web-access\browser 下的专用隔离实例
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { BROWSER_DIR } from './paths.mjs';
 
-const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CONFIG_PATH = path.join(SKILL_ROOT, 'config.env');
-
-// 已知支持 chrome://inspect#remote-debugging toggle 的浏览器
+// 已知支持 remote debugging 的浏览器：devToolsPath（日常安装的调试端口文件）+ exePaths（启动专用实例用）
 // 加新浏览器：只改这里
 export function knownBrowsers() {
   const home = os.homedir();
   const localAppData = process.env.LOCALAPPDATA || '';
+  const pf = process.env.ProgramFiles || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
   switch (os.platform()) {
     case 'darwin':
       return [
-        { id: 'chrome',        label: 'Chrome',         devToolsPath: path.join(home, 'Library/Application Support/Google/Chrome/DevToolsActivePort') },
-        { id: 'chrome-canary', label: 'Chrome Canary',  devToolsPath: path.join(home, 'Library/Application Support/Google/Chrome Canary/DevToolsActivePort') },
-        { id: 'chromium',      label: 'Chromium',       devToolsPath: path.join(home, 'Library/Application Support/Chromium/DevToolsActivePort') },
-        { id: 'edge',          label: 'Microsoft Edge', devToolsPath: path.join(home, 'Library/Application Support/Microsoft Edge/DevToolsActivePort') },
+        { id: 'chrome',   label: 'Chrome',         devToolsPath: path.join(home, 'Library/Application Support/Google/Chrome/DevToolsActivePort'), exePaths: ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'] },
+        { id: 'chrome-canary', label: 'Chrome Canary', devToolsPath: path.join(home, 'Library/Application Support/Google/Chrome Canary/DevToolsActivePort'), exePaths: ['/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'] },
+        { id: 'chromium', label: 'Chromium',       devToolsPath: path.join(home, 'Library/Application Support/Chromium/DevToolsActivePort'), exePaths: ['/Applications/Chromium.app/Contents/MacOS/Chromium'] },
+        { id: 'edge',     label: 'Microsoft Edge', devToolsPath: path.join(home, 'Library/Application Support/Microsoft Edge/DevToolsActivePort'), exePaths: ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'] },
       ];
     case 'linux':
       return [
-        { id: 'chrome',   label: 'Chrome',         devToolsPath: path.join(home, '.config/google-chrome/DevToolsActivePort') },
-        { id: 'chromium', label: 'Chromium',       devToolsPath: path.join(home, '.config/chromium/DevToolsActivePort') },
-        { id: 'edge',     label: 'Microsoft Edge', devToolsPath: path.join(home, '.config/microsoft-edge/DevToolsActivePort') },
+        { id: 'chrome',   label: 'Chrome',         devToolsPath: path.join(home, '.config/google-chrome/DevToolsActivePort'), exePaths: ['google-chrome', 'google-chrome-stable'] },
+        { id: 'chromium', label: 'Chromium',       devToolsPath: path.join(home, '.config/chromium/DevToolsActivePort'), exePaths: ['chromium', 'chromium-browser'] },
+        { id: 'edge',     label: 'Microsoft Edge', devToolsPath: path.join(home, '.config/microsoft-edge/DevToolsActivePort'), exePaths: ['microsoft-edge'] },
       ];
     case 'win32':
       return [
-        { id: 'chrome',   label: 'Chrome',         devToolsPath: path.join(localAppData, 'Google/Chrome/User Data/DevToolsActivePort') },
-        { id: 'chromium', label: 'Chromium',       devToolsPath: path.join(localAppData, 'Chromium/User Data/DevToolsActivePort') },
-        { id: 'edge',     label: 'Microsoft Edge', devToolsPath: path.join(localAppData, 'Microsoft/Edge/User Data/DevToolsActivePort') },
+        { id: 'chrome',   label: 'Chrome',         devToolsPath: path.join(localAppData, 'Google/Chrome/User Data/DevToolsActivePort'), exePaths: [path.join(localAppData, 'Google/Chrome/Application/chrome.exe'), path.join(pf, 'Google/Chrome/Application/chrome.exe'), path.join(pf86, 'Google/Chrome/Application/chrome.exe')] },
+        { id: 'chromium', label: 'Chromium',       devToolsPath: path.join(localAppData, 'Chromium/User Data/DevToolsActivePort'), exePaths: [path.join(localAppData, 'Chromium/Application/chrome.exe'), path.join(pf, 'Chromium/Application/chrome.exe')] },
+        { id: 'edge',     label: 'Microsoft Edge', devToolsPath: path.join(localAppData, 'Microsoft/Edge/User Data/DevToolsActivePort'), exePaths: [path.join(localAppData, 'Microsoft/Edge/Application/msedge.exe'), path.join(pf86, 'Microsoft/Edge/Application/msedge.exe'), path.join(pf, 'Microsoft/Edge/Application/msedge.exe')] },
       ];
     default:
       return [];
   }
 }
 
-// TCP 端口监听检测
-// 用 TCP connect 而非 WebSocket，避免触发浏览器的远程调试授权弹窗。
+// TCP 端口监听检测（不触发浏览器调试授权弹窗）
 export function checkPort(port, host = '127.0.0.1', timeoutMs = 2000) {
   return new Promise((resolve) => {
     const socket = net.createConnection(port, host);
     const timer = setTimeout(() => { socket.destroy(); resolve(false); }, timeoutMs);
     socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true); });
-    socket.once('error',   () => { clearTimeout(timer); resolve(false); });
+    socket.once('error', () => { clearTimeout(timer); resolve(false); });
   });
 }
 
-// 读 config.env 文件（不写入 process.env，分清来源）
-// 格式：KEY=VALUE，# 开头是注释
-function readConfig() {
-  const cfg = {};
+// 专用隔离实例：只读 %USERPROFILE%\.web-access\browser 的 DevToolsActivePort
+export async function findDedicatedInstance(dir = BROWSER_DIR) {
   let content;
-  try { content = fs.readFileSync(CONFIG_PATH, 'utf8'); }
-  catch { return cfg; }
-  for (const line of content.split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const i = t.indexOf('=');
-    if (i === -1) continue;
-    const k = t.slice(0, i).trim();
-    const v = t.slice(i + 1).trim();
-    if (k && v) cfg[k] = v;
-  }
-  return cfg;
+  try { content = fs.readFileSync(path.join(dir, 'DevToolsActivePort'), 'utf8'); } catch { return null; }
+  const lines = content.trim().split(/\r?\n/).filter(Boolean);
+  const port = parseInt(lines[0], 10);
+  if (!(port > 0 && port < 65536)) return null;
+  if (!(await checkPort(port))) return null;
+  return { id: 'dedicated', label: '专用隔离实例', devToolsPath: path.join(dir, 'DevToolsActivePort'), port, wsPath: lines[1] || null, dedicatedDir: dir };
 }
 
-// 返回所有开了 toggle 且端口活的浏览器
+// 兜底（仅 isolation=off 时使用）：扫描常用固定端口
+export async function findFallbackPort() {
+  for (const port of [9222, 9229, 9333]) if (await checkPort(port)) return port;
+  return null;
+}
+
+// 决策入口
+// override  — 命令行 --browser（最高优先，仅 isolation=off 时生效）
+// configured— permissions.json 的 browser 值（仅 isolation=off 时生效）
+// strict 模式：只认专用隔离实例，默认路径扫描与 fallback 端口全部不走
+export async function selectBrowser(override = null, configured = null, opts = {}) {
+  const isolation = opts.isolation ?? 'off';
+  const dedicatedDir = opts.dedicatedDir ?? BROWSER_DIR;
+
+  if (isolation === 'strict') {
+    const dedicated = await findDedicatedInstance(dedicatedDir);
+    if (dedicated) return { kind: 'ok', browser: dedicated, source: 'dedicated', detected: [], configured, isolation };
+    return { kind: 'no-dedicated', detected: [], configured, isolation };
+  }
+
+  const detected = (await detectAll());
+  if (override) {
+    const match = detected.find(b => b.id === override);
+    if (match) return { kind: 'ok', browser: match, source: 'override', detected, configured, override, isolation };
+    return { kind: 'mismatch', source: 'override', detected, configured, override, isolation };
+  }
+  if (configured) {
+    const match = detected.find(b => b.id === configured);
+    if (match) return { kind: 'ok', browser: match, source: 'preference', detected, configured, isolation };
+    return { kind: 'mismatch', source: 'preference', detected, configured, isolation };
+  }
+  if (detected.length === 0) return { kind: 'empty', detected, configured, isolation };
+  return { kind: 'ambiguous', detected, configured, isolation };
+}
+
+// 返回所有开了 toggle 且端口活的日常浏览器（isolation=off 模式专用）
 async function detectAll() {
   const result = [];
   for (const browser of knownBrowsers()) {
     let content;
-    try { content = fs.readFileSync(browser.devToolsPath, 'utf8'); }
-    catch { continue; }
+    try { content = fs.readFileSync(browser.devToolsPath, 'utf8'); } catch { continue; }
     const lines = content.trim().split(/\r?\n/).filter(Boolean);
     const port = parseInt(lines[0], 10);
     if (!(port > 0 && port < 65536)) continue;
@@ -92,47 +108,4 @@ async function detectAll() {
     result.push({ ...browser, port, wsPath: lines[1] || null });
   }
   return result;
-}
-
-// 决策入口
-// 参数：override — 调用方解析自命令行 --browser 的值（null 表示未传）
-// 返回 { kind, browser?, source?, detected, configured, override? }
-//   kind ∈ 'ok' | 'ambiguous' | 'mismatch' | 'empty'
-//   source ∈ 'override' | 'preference' | undefined
-//   ambiguous = 没设偏好 + 至少一个浏览器开了 toggle，需问用户
-//   mismatch  = override/配偏好设了但未检测到对应 toggle，硬错
-//   empty     = 0 浏览器开 toggle 且未设偏好/override
-export async function selectBrowser(override = null) {
-  const detected = await detectAll();
-  const configured = readConfig().WEB_ACCESS_BROWSER || null;
-
-  // 1. 命令行 override（最高优先，单次有效）
-  if (override) {
-    const match = detected.find(b => b.id === override);
-    if (match) return { kind: 'ok', browser: match, source: 'override', detected, configured, override };
-    return { kind: 'mismatch', source: 'override', detected, configured, override };
-  }
-
-  // 2. config.env preference（持久）
-  if (configured) {
-    const match = detected.find(b => b.id === configured);
-    if (match) return { kind: 'ok', browser: match, source: 'preference', detected, configured };
-    return { kind: 'mismatch', source: 'preference', detected, configured };
-  }
-
-  // 3. 无偏好 —— 一律询问用户（哪怕 detected 只有一个）
-  if (detected.length === 0) {
-    return { kind: 'empty', detected, configured };
-  }
-  return { kind: 'ambiguous', detected, configured };
-}
-
-// 兜底：扫描常用固定端口
-// 适用场景：用户手动 --remote-debugging-port=9222 启动浏览器，
-// 此时 DevToolsActivePort 可能不在默认 user-data-dir。
-export async function findFallbackPort() {
-  for (const port of [9222, 9229, 9333]) {
-    if (await checkPort(port)) return port;
-  }
-  return null;
 }
