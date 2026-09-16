@@ -180,7 +180,7 @@ node "<skill-base-dir>/scripts/wa.mjs close TARGET_ID"
 
 ### 登录判断
 
-用户日常浏览器天然携带登录态，大多数常用网站已登录。
+isolation=strict（默认）下专用实例是空浏览器——所有站点都未登录，需要登录态的内容会走下面的登录指引；isolation=off 时连接日常浏览器，才天然携带登录态。
 
 登录判断的核心问题只有一个：**目标内容拿到了吗？**
 
