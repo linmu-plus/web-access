@@ -1,74 +1,80 @@
 #!/usr/bin/env node
-// 环境检查 + 确保 CDP Proxy 就绪
+// check-deps —— 权限校验 + 专用实例/Proxy 编排（web-access v3 前置检查）
 //
 // 用法：
-//   node check-deps.mjs                  默认行为：读 config.env 偏好
-//   node check-deps.mjs --browser edge   本次临时指定浏览器（不写 config.env）
+//   node check-deps.mjs                  按 permissions.json 执行
+//   node check-deps.mjs --browser edge   本次临时指定浏览器（isolation=off 时生效）
 //
-// 持久偏好 → config.env (skill 根目录, gitignored)
-// 单次覆盖 → --browser 命令行参数（全链路 argv，不碰 process.env）
+// 退出码：0 就绪 | 1 失败 | 2 需用户决策（isolation=off 且多浏览器未设偏好）
 
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { selectBrowser, knownBrowsers, findFallbackPort } from './browser-discovery.mjs';
+import { ensureRuntimeDir, TOKEN_FILE } from './paths.mjs';
+import { selectBrowser, knownBrowsers } from './browser-discovery.mjs';
+import { launchBrowser } from './launch-browser.mjs';
+import { loadPermissions, migrateLegacyConfig, profileLine, LEGACY_CONFIG_PATH } from './permissions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROXY_SCRIPT = path.join(ROOT, 'scripts', 'cdp-proxy.mjs');
 const PROXY_PORT = Number(process.env.CDP_PROXY_PORT || 3456);
-const CONFIG_PATH = path.join(ROOT, 'config.env');
-const CONFIG_TEMPLATE = path.join(ROOT, 'templates', 'config.env.template');
-
-// --- 参数解析 ---
 
 function parseArgs(argv) {
   const opts = { browser: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--browser' && argv[i + 1]) { opts.browser = argv[i + 1]; i++; }
-    else if (argv[i].startsWith('--browser=')) { opts.browser = argv[i].slice('--browser='.length); }
+    else if (argv[i].startsWith('--browser=')) opts.browser = argv[i].slice('--browser='.length);
   }
   return opts;
 }
 
-// --- 首次安装：从模板创建 config.env ---
+function checkNode() {
+  const major = Number(process.versions.node.split('.')[0]);
+  if (major >= 22) console.log(`node: ok (v${process.versions.node})`);
+  else console.log(`node: warn (v${process.versions.node}, 建议升级到 22+)`);
+}
 
-function ensureConfigExists() {
-  if (fs.existsSync(CONFIG_PATH)) return;
+// --- 迁移旧 config.env ---
+function migrateLegacy() {
+  const legacy = migrateLegacyConfig();
+  if (!legacy) return;
   try {
-    fs.copyFileSync(CONFIG_TEMPLATE, CONFIG_PATH);
-    console.log(`config: 已从模板创建 ${CONFIG_PATH}`);
-  } catch {
-    // 模板不存在或拷贝失败 —— 不阻塞，readConfig 会兜底
+    const raw = JSON.parse(fs.readFileSync(path.join(ROOT, 'permissions.json'), 'utf8'));
+    if (!raw.browser) { raw.browser = legacy.value; fs.writeFileSync(path.join(ROOT, 'permissions.json'), JSON.stringify(raw, null, 2) + '\n'); }
+    console.log(`migrate: 已将 config.env 的 WEB_ACCESS_BROWSER=${legacy.value} 迁入 permissions.json`);
+    fs.unlinkSync(path.join(ROOT, 'config.env'));
+    console.log('migrate: 已删除旧 config.env');
+  } catch (e) {
+    console.log(`⚠️  config.env 迁移失败（${e.message}），忽略旧配置继续`);
   }
 }
 
-// --- Node.js 版本检查 ---
-
-function checkNode() {
-  const major = Number(process.versions.node.split('.')[0]);
-  const version = `v${process.versions.node}`;
-  if (major >= 22) console.log(`node: ok (${version})`);
-  else console.log(`node: warn (${version}, 建议升级到 22+)`);
+// --- proxy 启动与健康轮询（带 token） ---
+async function waitForToken(ms = 8000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try { const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); if (t) return t; } catch {}
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return null;
 }
 
-// --- CDP Proxy 启动与等待 ---
-
-function httpGetJson(url, timeoutMs = 3000) {
-  return fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
-    .then(async (res) => { try { return JSON.parse(await res.text()); } catch { return null; } })
-    .catch(() => null);
+function httpGetJson(url, token, timeoutMs = 3000) {
+  return fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal: AbortSignal.timeout(timeoutMs),
+  }).then(async (res) => { try { return JSON.parse(await res.text()); } catch { return null; } }).catch(() => null);
 }
 
 function startProxyDetached(browserOverride) {
   const logFile = path.join(os.tmpdir(), 'cdp-proxy.log');
   const logFd = fs.openSync(logFile, 'a');
-  const args = [PROXY_SCRIPT];
+  const args = [path.join(ROOT, 'scripts', 'cdp-proxy.mjs')];
   if (browserOverride) args.push('--browser', browserOverride);
   const child = spawn(process.execPath, args, {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
+    detached: true, stdio: ['ignore', logFd, logFd],
     ...(os.platform() === 'win32' ? { windowsHide: true } : {}),
   });
   child.unref();
@@ -76,130 +82,96 @@ function startProxyDetached(browserOverride) {
 }
 
 async function ensureProxy(expectedBrowserId, browserOverride) {
+  let token = await waitForToken(0);
   const healthUrl = `http://127.0.0.1:${PROXY_PORT}/health`;
   const targetsUrl = `http://127.0.0.1:${PROXY_PORT}/targets`;
 
-  // 复用：proxy 已运行 + 已连接浏览器 → 校验 expected vs actual
-  const health = await httpGetJson(healthUrl);
-  if (health?.status === 'ok' && health.connected) {
-    const runningId = health.browser?.id;
-    const runningLabel = health.browser?.label || runningId || 'unknown';
-    if (expectedBrowserId && runningId && runningId !== 'unknown' && runningId !== expectedBrowserId) {
-      console.log(`proxy: 浏览器不一致 — 当前已连着 ${runningLabel}，但本次需要 ${expectedBrowserId}`);
-      console.log('  请在终端运行 pkill -f cdp-proxy.mjs 重置后再试');
-      return false;
-    }
-    console.log(`proxy: ready (${runningLabel})`);
-    return true;
-  }
-
-  console.log('proxy: connecting...');
-  startProxyDetached(browserOverride);
-
-  await new Promise((r) => setTimeout(r, 2000));
-
-  for (let i = 1; i <= 15; i++) {
-    const result = await httpGetJson(targetsUrl, 8000);
-    if (Array.isArray(result)) {
-      const newHealth = await httpGetJson(healthUrl);
-      const label = newHealth?.browser?.label || 'unknown';
-      console.log(`proxy: ready (${label})`);
+  if (token) {
+    const health = await httpGetJson(healthUrl, token);
+    if (health?.status === 'ok' && health.connected) {
+      const runningId = health.browser?.id;
+      if (expectedBrowserId === 'dedicated' && runningId !== 'dedicated') {
+        console.log(`proxy: 当前连接非专用实例，需重启 —— 运行 node scripts/stop-proxy.mjs 后重跑本命令`);
+        return false;
+      }
+      console.log(`proxy: ready (${health.browser?.label || 'unknown'})`);
       return true;
     }
-    if (i === 1) {
-      console.log('⚠️  浏览器可能有授权弹窗，请点击「允许」后等待连接...');
-    }
-    await new Promise((r) => setTimeout(r, 1000));
   }
 
-  console.log('❌ 连接超时，请检查浏览器调试设置');
-  console.log(`  日志：${path.join(os.tmpdir(), 'cdp-proxy.log')}`);
+  console.log('proxy: starting...');
+  startProxyDetached(browserOverride);
+  token = await waitForToken(8000);
+  if (!token) { console.error('❌ proxy 未写出 token（查看 %TEMP%\\cdp-proxy.log）'); return false; }
+
+  for (let i = 1; i <= 15; i++) {
+    const result = await httpGetJson(targetsUrl, token, 8000);
+    if (Array.isArray(result)) {
+      const h = await httpGetJson(healthUrl, token);
+      console.log(`proxy: ready (${h?.browser?.label || 'unknown'})`);
+      return true;
+    }
+    if (i === 1) console.log('⚠️  等待浏览器连接中（专用实例若未启动会被自动拉起）...');
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.error('❌ 连接超时。日志：' + path.join(os.tmpdir(), 'cdp-proxy.log'));
   return false;
 }
 
-// --- 输出浏览器选择结果，返回是否可以继续启动 proxy ---
-
-function printAvailableHint(detected) {
-  const detectedIds = new Set(detected.map(b => b.id));
-  const configurable = knownBrowsers().filter(b => !detectedIds.has(b.id));
-  if (detected.length) {
-    console.log(`  已开启远程调试：${detected.map(b => `${b.label} (${b.id}, port ${b.port})`).join('、')}`);
-  }
-  if (configurable.length) {
-    console.log(`  其他可配置：${configurable.map(b => `${b.label} (${b.id})`).join('、')}`);
-  }
-}
-
-async function resolveAndReport(override) {
-  const result = await selectBrowser(override);
-
+// --- 浏览器决策（含 strict 自动拉起） ---
+async function resolveBrowser(override, cfg) {
+  const result = await selectBrowser(override, cfg.browser, { isolation: cfg.isolation });
   switch (result.kind) {
     case 'ok': {
-      const sourceTag = result.source === 'override' ? '[--browser 指定]' : '[config.env 偏好]';
-      console.log(`browser: ok (${result.browser.label}, port ${result.browser.port}) ${sourceTag}`);
+      const tag = { override: '[--browser 指定]', preference: '[permissions.json 偏好]', dedicated: '[专用隔离实例]' }[result.source] || '';
+      console.log(`browser: ok (${result.browser.label}, port ${result.browser.port}) ${tag}`);
       return { proceed: true, browserId: result.browser.id };
     }
-
+    case 'no-dedicated': {
+      console.log('browser: 专用隔离实例未运行，正在启动...');
+      const inst = await launchBrowser(override);
+      if (!inst) return { proceed: false, exitCode: 1 };
+      console.log(`browser: ok (专用隔离实例, 端口 ${inst.port})`);
+      return { proceed: true, browserId: 'dedicated' };
+    }
     case 'ambiguous': {
-      console.log('browser: needs decision — 用户尚未在 config.env 设置偏好');
-      printAvailableHint(result.detected);
-      console.log('  请询问用户：哪个浏览器作为 Agent 的默认？（写入 config.env 的 WEB_ACCESS_BROWSER）');
-      console.log('  若仅本次使用，可重跑：node check-deps.mjs --browser <id>');
+      const detectedIds = new Set(result.detected.map(b => b.id));
+      console.log(`browser: needs decision — 未设偏好。已开调试：${result.detected.map(b => `${b.label}(${b.port})`).join('、') || '无'}`);
+      console.log('  其他可配置：' + knownBrowsers().filter(b => !detectedIds.has(b.id)).map(b => b.label).join('、'));
+      console.log('  请询问用户在 permissions.json 设 "browser" 字段');
       return { proceed: false, exitCode: 2 };
     }
-
-    case 'mismatch': {
-      const expected = result.override || result.configured;
-      const expectedLabel = knownBrowsers().find(b => b.id === expected)?.label || expected;
-      const sourceDesc = result.source === 'override' ? '本次指定' : '默认偏好';
-      console.log(`browser: error — ${sourceDesc}的浏览器是 "${expected}" (${expectedLabel})，但没连上`);
-      console.log(`  Agent 处理顺序：`);
-      console.log(`    1. 先用系统命令打开 ${expectedLabel}（按你所在平台自行选择，如 macOS 的 open -a），再重新运行 node check-deps.mjs`);
-      console.log(`    2. 若仍报相同错误，可能是因为远程调试开关没启用 —— 告诉用户：在 ${expectedLabel} 的地址栏访问 ${expected}://inspect/#remote-debugging，勾选 "Allow remote debugging for this browser instance"`);
-      printAvailableHint(result.detected);
-      if (result.source === 'preference') {
-        console.log(`  也可以编辑 config.env 改默认偏好，或本次临时换浏览器：node check-deps.mjs --browser <id>`);
-      }
-      return { proceed: false, exitCode: 1 };
-    }
-
-    case 'empty': {
-      // 末路兜底：尝试常见固定端口（用户手动 --remote-debugging-port=9222 启动的场景）
-      const fallbackPort = await findFallbackPort();
-      if (fallbackPort) {
-        console.log(`browser: ok (port ${fallbackPort}) [通过手动调试端口连接]`);
-        return { proceed: true };
-      }
-      console.log('browser: 未连接 — 没有任何浏览器打开远程调试开关');
-      console.log(`  支持的浏览器：${knownBrowsers().map(b => b.label).join('、')}`);
-      console.log('  在你想用的浏览器地址栏打开 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging，勾选 "Allow remote debugging for this browser instance"');
+    case 'mismatch': case 'empty': {
+      console.log(`browser: error — isolation=off 模式下 ${result.kind}`);
+      console.log('  建议回到默认 strict 隔离模式（专用实例由 launch-browser.mjs 管理）');
       return { proceed: false, exitCode: 1 };
     }
   }
 }
 
-// --- main ---
-
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  ensureConfigExists();
+  ensureRuntimeDir();
+  migrateLegacy();
+
+  let perms;
+  try { perms = loadPermissions(); }
+  catch (e) { console.error('❌ ' + e.message); process.exit(1); }
+  if (perms.fileMissing) console.log('⚠️  permissions.json 缺失——正在使用内置默认策略');
+  console.log(profileLine(perms.cfg));
+
   checkNode();
 
-  const { proceed, exitCode, browserId } = await resolveAndReport(opts.browser);
+  const opts = parseArgs(process.argv.slice(2));
+  const { proceed, exitCode, browserId } = await resolveBrowser(opts.browser, perms.cfg);
   if (!proceed) process.exit(exitCode);
 
   const proxyOk = await ensureProxy(browserId, opts.browser);
   if (!proxyOk) process.exit(1);
 
-  // 列出已有站点经验
   const patternsDir = path.join(ROOT, 'references', 'site-patterns');
   try {
-    const sites = fs.readdirSync(patternsDir)
-      .filter(f => f.endsWith('.md'))
-      .map(f => f.replace(/\.md$/, ''));
-    if (sites.length) {
-      console.log(`\nsite-patterns: ${sites.join(', ')}`);
-    }
+    const sites = fs.readdirSync(patternsDir).filter(f => f.endsWith('.md')).map(f => f.replace(/\.md$/, ''));
+    if (sites.length) console.log(`\nsite-patterns: ${sites.join(', ')}`);
   } catch {}
 }
 
