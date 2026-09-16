@@ -5,8 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { BROWSER_DIR, ensureRuntimeDir } from './paths.mjs';
+import { BROWSER_DIR, ensureRuntimeDir, isMainEntry } from './paths.mjs';
 import { knownBrowsers, checkPort, findDedicatedInstance } from './browser-discovery.mjs';
 import { loadPermissions } from './permissions.mjs';
 
@@ -212,7 +211,7 @@ export async function launchBrowser(override = null) {
   die('60 秒内专用实例未就绪（DevToolsActivePort 未生成且调试端口 HTTP 探测无响应）。若浏览器已弹出窗口，稍后重跑本命令。');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainEntry(import.meta.url)) {
   const inst = await launchBrowser(parseBrowserArg());
   process.exit(inst ? 0 : 1);
 }
