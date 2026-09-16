@@ -107,7 +107,8 @@ Agent 侧统一通过 `wa.mjs` 调用（内部读 token、设头），无需每�
 - `domains`：`off` / `allowlist`；`allow`、`block` 为域名数组；默认 `off`。
 - `endpoints`：`{ "<endpoint>": true|false }`；空 = 全开。
 - `paths`：`{ screenshotRoot: "", setFilesRoots: [] }`；空 = 不限制。
-- **校验（fail-closed）**：JSON 语法错、未知顶层字段、枚举非法 → check-deps 硬错并逐字段指出；绝不带坏配置启动。
+- **校验（fail-closed）**：按字段进行——JSON 语法错或未知顶层字段 → 硬错并逐字段指出；合法字段缺失 → 采用内置默认（上方示例即内置默认，全部为安全态）；枚举非法 → 硬错并指出。绝不带坏配置启动。
+- **文件缺失**：使用内置默认策略（isolation=strict、confirm=soft、domains=off），**每次运行显著警告**「permissions.json 缺失，正在使用内置默认策略」。**不设首启模板复制机制**——理由：①permissions.json 入 git，clone 后即存在，模板要解决的「首启缺口」不存在（原 config.env 是 gitignored 私有状态才需要模板）；②「缺失→重新生成」会把用户自定义策略静默重置为出厂值（如 confirm: hard 回落到 soft），属安全倒退方向的失败；③恢复出厂 = `git restore permissions.json`，git 本身就是模板。JSON 无注释带来的文档需求由 SKILL.md 配置节 + check-deps 剖面输出承担。
 - **迁移**：check-deps 检测到 `config.env` → 将 `WEB_ACCESS_BROWSER` 迁入 permissions.json → 提示后删除旧文件；迁移失败则以默认值继续并警告。`templates/config.env.template` 删除。
 - check-deps 每次输出一行**生效权限剖面**（isolation / confirm / domains 状态），会话开始前可见。
 
