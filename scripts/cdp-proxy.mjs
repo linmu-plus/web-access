@@ -79,7 +79,7 @@ async function discoverChromePort() {
     if (pinnedBrowserId && pinnedBrowserId !== result.browser.id) {
       throw new Error(
         `本次连接的浏览器已经是 ${pinnedBrowserId}，不会自动切到 ${result.browser.id}。` +
-        `如果想换成 ${result.browser.id}，请先在终端运行 pkill -f cdp-proxy.mjs 重置。`
+        `如果想换成 ${result.browser.id}，请先在终端运行 node scripts/stop-proxy.mjs 重置。`
       );
     }
     pinnedBrowserId = result.browser.id;
@@ -108,7 +108,7 @@ async function discoverChromePort() {
       `本次连接的浏览器是 ${pinnedBrowserId}，但现在没连上。Agent 处理顺序：` +
       `(1) 先用系统命令打开 ${pinnedBrowserId}（按平台选择），稍等后重试请求；` +
       `(2) 若仍失败，告知用户在地址栏访问 ${pinnedBrowserId}://inspect/#remote-debugging 重新勾选允许。` +
-      `若想换成其他浏览器，请先在终端运行 pkill -f cdp-proxy.mjs 重置。`
+      `若想换成其他浏览器，请先在终端运行 node scripts/stop-proxy.mjs 重置。`
     );
   }
   // 仅在 isolation=off 且「从未成功连接 + 无偏好/override」时允许固定端口兜底（手动 --remote-debugging-port 启动场景）
