@@ -54,6 +54,25 @@ export function detectImportArtifacts(browserDir) {
   return hits;
 }
 
+// H) 首启导入污染检测的门控（纯函数，可测）：
+// fresh 判据放宽（I2 事故形态）：目录存在但只有脚手架（早前浏览器尝试留下的
+// First Run/空组件目录，无 Default）时，旧判据 `!fs.existsSync(BROWSER_DIR)` 会判为
+// 非 fresh → 整个跳过导入检测，而浏览器仍可能按首启自动导入。
+// 用户手动数据全在 Default\ 下——无 Default 即无用户数据可误杀，
+// 因此「目录不存在」或「无 Default」都视为 fresh 并跑导入检测。
+export function shouldRunImportCheck({ dirExists, defaultExists }) {
+  return !dirExists || !defaultExists;
+}
+
+// M4）kill/purge 处的 pid 收集（纯函数，可测）：recordedPid 与 childPid 去重，
+// 同一 pid 只 kill 一次；空值过滤，recordedPid 优先在前。
+export function collectPids(recordedPid, childPid) {
+  return [...new Set([recordedPid, childPid].filter(pid => pid != null))];
+}
+
+// 首启导入是异步过程，可能晚于就绪快照落盘（I1）：首次检测通过后延迟 5 秒复检一次。
+export const IMPORT_RECHECK_DELAY_MS = 5000;
+
 // 身份状态检查（尽力而为的软报告，非拦截）：不硬失败、不杀浏览器——
 // 硬杀会把用户手动登录的小号会话一起杀掉，与「专用实例允许手动登录选定站点」的语义冲突；
 // 隐式登录的数据同步已由 --disable-sync 切断，这里只做状态披露。
@@ -72,28 +91,39 @@ function checkIdentityState() {
 }
 
 // H) 全新目录的收尾（升级版就绪验证）：就绪判定通过后做首启导入检测。
-// 命中 → 杀掉刚 spawn 的实例（dedicated.json 记录 pid 优先 / child.pid 兜底）→
+// I1）就绪快照可能早于首启导入落盘：首次检测通过后延迟 5 秒复检一次——
+// 复检命中 → 同一 kill+purge+die 路径（die 文案注明「延迟复检发现」）；
+// 复检干净 → 静默通过（复检在 die 之外不产生任何行为副作用）。
+// 命中 → 杀掉刚 spawn 的实例（dedicated.json 记录 pid 优先 / child.pid 兜底，去重）→
 // 1s 退避 → 删除整个 BROWSER_DIR（含导入副本）→ fail-closed die。
 // 不自动重拉：全新目录重拉会再次触发首启导入形成死循环，处置权交给调用方。
-// 目录已存在（重启场景）不做导入检测——用户手动往专用实例加书签属设计允许，避免误杀。
+// 目录已存在且含 Default（用户手动数据，重启场景）不做导入检测——用户手动往专用实例加书签属设计允许，避免误杀。
 async function finalizeFreshInstance(freshDir, childPid) {
   const inst = await findDedicatedInstance();
   if (freshDir) {
-    const hits = detectImportArtifacts(BROWSER_DIR);
+    let hits = detectImportArtifacts(BROWSER_DIR);
+    let detectedByRecheck = false;
+    if (hits.length === 0) {
+      await new Promise(r => setTimeout(r, IMPORT_RECHECK_DELAY_MS));
+      hits = detectImportArtifacts(BROWSER_DIR);
+      detectedByRecheck = hits.length > 0;
+    }
     if (hits.length > 0) {
       let recordedPid = null;
       try { recordedPid = JSON.parse(fs.readFileSync(path.join(BROWSER_DIR, 'dedicated.json'), 'utf8'))?.pid ?? null; } catch { /* 无记录则用 child.pid */ }
-      for (const pid of [recordedPid, childPid]) {
-        if (pid) { try { process.kill(pid); } catch { /* 进程已退出，忽略 */ } }
+      for (const pid of collectPids(recordedPid, childPid)) {
+        try { process.kill(pid); } catch { /* 进程已退出，忽略 */ }
       }
       await new Promise(r => setTimeout(r, 1000));
       let rmError = null;
       try { fs.rmSync(BROWSER_DIR, { recursive: true, force: true }); } catch (e) { rmError = e; }
       die([
-        `检测到全新数据目录被浏览器首启自动导入污染（fail-closed：宁可拒绝工作，也不在污染实例上干活），已终止专用实例并删除数据目录 ${BROWSER_DIR}`,
+        rmError
+          ? `检测到全新数据目录被浏览器首启自动导入污染（fail-closed：宁可拒绝工作，也不在污染实例上干活），已终止专用实例，但数据目录删除未完成（${rmError.message}）——需手动删除：${BROWSER_DIR}`
+          : `检测到全新数据目录被浏览器首启自动导入污染（fail-closed：宁可拒绝工作，也不在污染实例上干活），已终止专用实例并删除数据目录 ${BROWSER_DIR}`,
+        ...(detectedByRecheck ? ['说明：首次就绪检测未命中，延迟 5 秒复检才发现导入落盘（首启导入是异步过程，可能晚于就绪快照）'] : []),
         `命中项：${hits.join('；')}`,
         `机制：浏览器首启会自动导入你日常 Chrome 的书签/自动填充/密码/扩展与账号元数据——该导入通道与隐式登录相互独立，--no-first-run/--disable-sync 均拦不住，此为独立防线`,
-        ...(!rmError ? [] : [`⚠️ 污染数据目录删除未完成（${rmError.message}）——请手动删除后再继续`]),
         `出路：① 改用 --browser chrome 启动专用实例（需日常 Chrome 未运行时启动）② 设置 Edge 策略 AutoImportAtFirstRun=0 关闭首启自动导入（会影响日常 Edge 的首启导入行为，需你确认后自行设置）`,
       ].join('\n'));
     }
@@ -112,8 +142,14 @@ function parseBrowserArg() {
 }
 
 export async function launchBrowser(override = null) {
-  // freshDir 判定必须在任何建目录动作之前：BROWSER_DIR 此前不存在 → 本轮是全新目录
-  const freshDir = !fs.existsSync(BROWSER_DIR);
+  // freshDir 判定必须在任何建目录动作之前。I2 门控放宽：目录存在但无 Default（只有
+  // 脚手架，如早前浏览器尝试留下的 First Run/空组件目录）也视为 fresh 并跑导入检测——
+  // 用户手动数据全在 Default\ 下，无 Default 即无用户数据可误杀。
+  const dirExists = fs.existsSync(BROWSER_DIR);
+  const freshDir = shouldRunImportCheck({
+    dirExists,
+    defaultExists: dirExists && fs.existsSync(path.join(BROWSER_DIR, 'Default')),
+  });
   ensureRuntimeDir();
   const { cfg } = loadPermissions();
   const id = override || cfg.browser;
