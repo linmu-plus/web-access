@@ -10,6 +10,24 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { selectBrowser, findFallbackPort } from './browser-discovery.mjs';
+import { ensureRuntimeDir, TOKEN_FILE, PID_FILE, AUDIT_FILE } from './paths.mjs';
+import { checkAuth, newToken } from './auth.mjs';
+import { loadPermissions, profileLine } from './permissions.mjs';
+import { checkConfirm } from './confirm-lib.mjs';
+
+// --- 权限配置（fail-closed：坏配置直接退出） ---
+let PERMS, CONFIG_MISSING = false;
+try { ({ cfg: PERMS, fileMissing: CONFIG_MISSING } = loadPermissions()); }
+catch (e) { console.error('[CDP Proxy] ❌ ' + e.message); process.exit(1); }
+
+// --- 运行时鉴权与审计 ---
+const TOKEN = newToken();
+const AUDITED = new Set(['/new', '/navigate', '/click', '/clickAt', '/setFiles', '/eval']);
+
+function audit(entry) {
+  try { fs.appendFileSync(AUDIT_FILE, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n'); }
+  catch (e) { console.error('[CDP Proxy] audit 写入失败:', e.message); }
+}
 
 // --- 解析命令行 --browser 参数（本次启动用哪个浏览器）---
 function parseBrowserArg() {
@@ -56,7 +74,7 @@ let pinnedBrowserId = null;
 // --- 自动发现浏览器调试端口 ---
 // 决策完全委派给 browser-discovery.selectBrowser；此处只做日志和返回结构包装。
 async function discoverChromePort() {
-  const result = await selectBrowser(BROWSER_OVERRIDE);
+  const result = await selectBrowser(BROWSER_OVERRIDE, PERMS.browser, { isolation: PERMS.isolation });
   if (result.kind === 'ok') {
     if (pinnedBrowserId && pinnedBrowserId !== result.browser.id) {
       throw new Error(
@@ -69,6 +87,10 @@ async function discoverChromePort() {
     const tag = result.source === 'override' ? '[--browser 指定]' : '[config.env 偏好]';
     console.log(`[CDP Proxy] 选用 ${result.browser.label} (端口 ${result.browser.port}${result.browser.wsPath ? '，带 wsPath' : ''}) ${tag}`);
     return { port: result.browser.port, wsPath: result.browser.wsPath };
+  }
+  // strict 隔离：专用实例缺失 → 硬错，绝不碰日常浏览器
+  if (result.kind === 'no-dedicated') {
+    throw new Error('专用隔离实例未运行。处理：node scripts/launch-browser.mjs（或由 check-deps.mjs 自动拉起）。isolation=strict 下不会连接日常浏览器。');
   }
   // mismatch：有显式偏好但未检测到 —— 硬错，绝不降级
   if (result.kind === 'mismatch') {
@@ -89,7 +111,8 @@ async function discoverChromePort() {
       `若想换成其他浏览器，请先在终端运行 pkill -f cdp-proxy.mjs 重置。`
     );
   }
-  // 仅在「从未成功连接 + 无偏好/override」时允许固定端口兜底（手动 --remote-debugging-port 启动场景）
+  // 仅在 isolation=off 且「从未成功连接 + 无偏好/override」时允许固定端口兜底（手动 --remote-debugging-port 启动场景）
+  if (PERMS.isolation === 'strict') throw new Error('isolation=strict 下不应走到兜底逻辑（专用实例发现失败）。请重跑 check-deps.mjs。');
   const fallbackPort = await findFallbackPort();
   if (fallbackPort !== null) {
     connectedBrowser = { id: 'unknown', label: '未知（通过手动调试端口连接）', source: 'fallback' };
@@ -312,6 +335,23 @@ async function waitForLoad(
   });
 }
 
+// --- permissions.json 强制项 ---
+function domainDenied(url) {
+  const d = PERMS.domains;
+  if (d.mode !== 'allowlist') return null;
+  let host;
+  try { host = new URL(url).hostname; } catch { return `目标 URL 无法解析出域名: ${url.slice(0, 80)}`; }
+  if (d.block.some(b => host === b || host.endsWith('.' + b))) return `域名 ${host} 在 permissions.json 的 block 列表中`;
+  if (d.allow.length && !d.allow.some(a => host === a || host.endsWith('.' + a))) return `域名 ${host} 不在 permissions.json 的 allow 列表内`;
+  return null;
+}
+
+function pathDenied(p, roots) {
+  if (!roots || !roots.length) return false;   // 未配置 = 不限制
+  const abs = path.resolve(p);
+  return !roots.some(r => { const base = path.resolve(r); return abs === base || abs.startsWith(base + path.sep); });
+}
+
 // --- 读取 POST body ---
 async function readBody(req) {
   let body = '';
@@ -321,14 +361,38 @@ async function readBody(req) {
 
 // --- HTTP API ---
 const server = http.createServer(async (req, res) => {
+  const started = Date.now();
   const parsed = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = parsed.pathname;
   const q = Object.fromEntries(parsed.searchParams);
   if (q.target) touchTab(q.target);
+  const reqBody = req.method === 'POST' ? await readBody(req) : '';
 
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   try {
+    // --- 入口鉴权：三层校验，任一失败即 403 ---
+    const denied = checkAuth(req, TOKEN, PORT);
+    if (denied) {
+      audit({ endpoint: pathname, deny: denied.error });
+      res.statusCode = denied.status;
+      res.end(JSON.stringify({ error: denied.error }));
+      return;
+    }
+    // --- 端点禁用（permissions.json endpoints，默认全开） ---
+    if (PERMS.endpoints[pathname] === false) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: `端点 ${pathname} 已被 permissions.json 禁用` }));
+      return;
+    }
+    // --- 硬确认门（仅 confirm.mode=hard 且命中 hardEndpoints） ---
+    if (PERMS.confirm.mode === 'hard' && PERMS.confirm.hardEndpoints.includes(pathname)) {
+      const cf = checkConfirm(req.headers['x-web-access-confirm']);
+      if (cf) { res.statusCode = cf.status; res.end(JSON.stringify({ error: cf.error })); return; }
+      audit({ endpoint: pathname, target: q.target || '', confirmed: true, summary: reqBody.slice(0, 200) });
+    }
+    const hardAudited = PERMS.confirm.mode === 'hard' && PERMS.confirm.hardEndpoints.includes(pathname);
+
     // /health 不需要连接浏览器
     if (pathname === '/health') {
       const connected = ws && (ws.readyState === WS.OPEN || ws.readyState === 1);
@@ -363,8 +427,9 @@ const server = http.createServer(async (req, res) => {
         }));
         return;
       }
-      const body = (await readBody(req)).trim();
-      const targetUrl = body || 'about:blank';
+      const targetUrl = (reqBody || 'about:blank').trim();
+      const domErr = domainDenied(targetUrl);
+      if (domErr) { audit({ endpoint: '/new', deny: domErr }); res.statusCode = 403; res.end(JSON.stringify({ error: domErr })); return; }
       // 先创建空白页并完成 attach，再显式导航。Target.createTarget({ url }) 会先暴露
       // readyState=complete 的 about:blank，导致慢页面在真正开始加载前被误判为完成。
       const resp = await sendCDP('Target.createTarget', { url: 'about:blank', background: true });
@@ -380,6 +445,7 @@ const server = http.createServer(async (req, res) => {
         } catch { /* 非致命，继续 */ }
       }
 
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify({ targetId }));
     }
 
@@ -388,6 +454,7 @@ const server = http.createServer(async (req, res) => {
       const resp = await sendCDP('Target.closeTarget', { targetId: q.target });
       sessions.delete(q.target);
       managedTabs.delete(q.target);
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify(resp.result));
     }
 
@@ -402,13 +469,16 @@ const server = http.createServer(async (req, res) => {
         }));
         return;
       }
-      const targetUrl = (await readBody(req)).trim();
+      const targetUrl = reqBody.trim();
+      const domErr = domainDenied(targetUrl);
+      if (domErr) { audit({ endpoint: '/navigate', deny: domErr }); res.statusCode = 403; res.end(JSON.stringify({ error: domErr })); return; }
       const sid = await ensureSession(q.target);
       const resp = await sendCDP('Page.navigate', { url: targetUrl }, sid);
 
       // 等待页面加载完成
       await waitForLoad(sid);
 
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify(resp.result));
     }
 
@@ -417,26 +487,28 @@ const server = http.createServer(async (req, res) => {
       const sid = await ensureSession(q.target);
       await sendCDP('Runtime.evaluate', { expression: 'history.back()' }, sid);
       await waitForLoad(sid);
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify({ ok: true }));
     }
 
     // POST /eval?target=xxx - 执行 JS
     else if (pathname === '/eval') {
       const sid = await ensureSession(q.target);
-      const body = await readBody(req);
-      const expr = body || q.expr || 'document.title';
+      const expr = reqBody || q.expr || 'document.title';
       const resp = await sendCDP('Runtime.evaluate', {
         expression: expr,
         returnByValue: true,
         awaitPromise: true,
       }, sid);
       if (resp.result?.result?.value !== undefined) {
-        res.end(JSON.stringify({ value: resp.result.result.value }));
+        if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
+        res.end(JSON.stringify({ confirmReminder: true, value: resp.result.result.value }));
       } else if (resp.result?.exceptionDetails) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: resp.result.exceptionDetails.text }));
       } else {
-        res.end(JSON.stringify(resp.result));
+        if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
+        res.end(JSON.stringify({ confirmReminder: true, ...resp.result }));
       }
     }
 
@@ -444,7 +516,7 @@ const server = http.createServer(async (req, res) => {
     // POST /click?target=xxx — JS 层面点击（简单快速，覆盖大多数场景）
     else if (pathname === '/click') {
       const sid = await ensureSession(q.target);
-      const selector = await readBody(req);
+      const selector = reqBody;
       if (!selector) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'POST body 需要 CSS 选择器' }));
@@ -469,7 +541,8 @@ const server = http.createServer(async (req, res) => {
           res.statusCode = 400;
           res.end(JSON.stringify(val));
         } else {
-          res.end(JSON.stringify(val));
+          if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
+          res.end(JSON.stringify({ confirmReminder: true, ...val }));
         }
       } else {
         res.end(JSON.stringify(resp.result));
@@ -479,7 +552,7 @@ const server = http.createServer(async (req, res) => {
     // POST /clickAt?target=xxx — CDP 浏览器级真实鼠标点击（算用户手势，能触发文件对话框、绕过反自动化检测）
     else if (pathname === '/clickAt') {
       const sid = await ensureSession(q.target);
-      const selector = await readBody(req);
+      const selector = reqBody;
       if (!selector) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'POST body 需要 CSS 选择器' }));
@@ -510,19 +583,22 @@ const server = http.createServer(async (req, res) => {
       await sendCDP('Input.dispatchMouseEvent', {
         type: 'mouseReleased', x: coord.x, y: coord.y, button: 'left', clickCount: 1
       }, sid);
-      res.end(JSON.stringify({ clicked: true, x: coord.x, y: coord.y, tag: coord.tag, text: coord.text }));
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
+      res.end(JSON.stringify({ confirmReminder: true, clicked: true, x: coord.x, y: coord.y, tag: coord.tag, text: coord.text }));
     }
 
     // POST /setFiles?target=xxx — 给 file input 设置本地文件（绕过文件对话框）
     // body: JSON { "selector": "input[type=file]", "files": ["/path/to/file1.png", "/path/to/file2.png"] }
     else if (pathname === '/setFiles') {
       const sid = await ensureSession(q.target);
-      const body = JSON.parse(await readBody(req));
+      const body = JSON.parse(reqBody);
       if (!body.selector || !body.files) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: '需要 selector 和 files 字段' }));
         return;
       }
+      const bad = (body.files || []).find(f => pathDenied(f, PERMS.paths.setFilesRoots));
+      if (bad) { audit({ endpoint: '/setFiles', deny: `文件越界: ${bad}` }); res.statusCode = 403; res.end(JSON.stringify({ error: `文件 ${bad} 不在 permissions.json paths.setFilesRoots 白名单目录内` })); return; }
       // 获取 DOM 节点
       await sendCDP('DOM.enable', {}, sid);
       const doc = await sendCDP('DOM.getDocument', {}, sid);
@@ -540,6 +616,7 @@ const server = http.createServer(async (req, res) => {
         nodeId: node.result.nodeId,
         files: body.files
       }, sid);
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify({ success: true, files: body.files.length }));
     }
 
@@ -564,6 +641,7 @@ const server = http.createServer(async (req, res) => {
       }, sid);
       // 等待懒加载触发
       await new Promise(r => setTimeout(r, 800));
+      if (!hardAudited) audit({ endpoint: pathname, target: q.target || '', summary: reqBody.slice(0, 200) });
       res.end(JSON.stringify({ value: resp.result?.result?.value }));
     }
 
@@ -576,6 +654,11 @@ const server = http.createServer(async (req, res) => {
         quality: format === 'jpeg' ? 80 : undefined,
       }, sid);
       if (q.file) {
+        if (PERMS.paths.screenshotRoot && pathDenied(q.file, [PERMS.paths.screenshotRoot])) {
+          res.statusCode = 403;
+          res.end(JSON.stringify({ error: 'screenshot 保存路径不在 permissions.json paths.screenshotRoot 内' }));
+          return;
+        }
         fs.writeFileSync(q.file, Buffer.from(resp.result.data, 'base64'));
         res.end(JSON.stringify({ saved: q.file }));
       } else {
@@ -651,9 +734,13 @@ async function main() {
     process.exit(1);
   }
 
+  ensureRuntimeDir();
   server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[CDP Proxy] 运行在 http://localhost:${PORT}`);
-    // 启动时尝试连接 Chrome（非阻塞）
+    fs.writeFileSync(TOKEN_FILE, TOKEN);
+    fs.writeFileSync(PID_FILE, String(process.pid));
+    console.log(`[CDP Proxy] 运行在 http://127.0.0.1:${PORT}`);
+    console.log(`[CDP Proxy] ${profileLine(PERMS)}`);
+    if (CONFIG_MISSING) console.error('[CDP Proxy] ⚠️  permissions.json 缺失，正在使用内置默认策略');
     connect().catch(e => console.error('[CDP Proxy] 初始连接失败:', e.message, '（将在首次请求时重试）'));
   });
 
@@ -665,6 +752,7 @@ async function main() {
     console.log(`[CDP Proxy] ${sig}, cleaning up...`);
     clearInterval(cleanupTimer);
     await closeAllManagedTabs();
+    try { fs.unlinkSync(PID_FILE); } catch {}
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
