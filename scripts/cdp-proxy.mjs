@@ -341,6 +341,8 @@ function domainDenied(url) {
   if (d.mode !== 'allowlist') return null;
   let host;
   try { host = new URL(url).hostname; } catch { return `目标 URL 无法解析出域名: ${url.slice(0, 80)}`; }
+  // 空 hostname（about:/data:/javascript:/chrome:/file: 等无域名 scheme）不属于域名白名单的管辖对象，放行以保留 about:blank 先建页再导航的核心工作流
+  if (!host) return null;
   if (d.block.some(b => host === b || host.endsWith('.' + b))) return `域名 ${host} 在 permissions.json 的 block 列表中`;
   if (d.allow.length && !d.allow.some(a => host === a || host.endsWith('.' + a))) return `域名 ${host} 不在 permissions.json 的 allow 列表内`;
   return null;
