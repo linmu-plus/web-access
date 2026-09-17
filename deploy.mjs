@@ -43,7 +43,19 @@ if (path.resolve(TARGET).startsWith(path.resolve(SKILL_ROOT) + path.sep)) {
 }
 
 fs.mkdirSync(TARGET, { recursive: true });
-for (const f of FILES) fs.copyFileSync(path.join(SKILL_ROOT, f), path.join(TARGET, f));
+for (const f of FILES) {
+  const src = path.join(SKILL_ROOT, f);
+  const dst = path.join(TARGET, f);
+  // permissions.json 是「用户偏好」而非代码：安装副本已存在时保留其现值，
+  // 否则会把你在安装副本里选的 browser 偏好冲回出厂默认。需要强制覆盖用 --force-config。
+  if (f === 'permissions.json' && fs.existsSync(dst) && !args.includes('--force-config')) {
+    const cur = fs.readFileSync(dst, 'utf8');
+    const next = fs.readFileSync(src, 'utf8');
+    if (cur !== next) console.log('ℹ️  permissions.json 已存在，保留安装副本现值（如需覆盖：--force-config）');
+    continue;
+  }
+  fs.copyFileSync(src, dst);
+}
 for (const d of DIRS) {
   fs.rmSync(path.join(TARGET, d), { recursive: true, force: true });
   fs.cpSync(path.join(SKILL_ROOT, d), path.join(TARGET, d), { recursive: true });
