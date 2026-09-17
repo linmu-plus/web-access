@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BROWSER_DIR } from './paths.mjs';
-import { checkPort } from './browser-discovery.mjs';
+import { checkPort, pickProfileBrowserPids, listBrowserProcesses } from './browser-discovery.mjs';
 import { isMainEntry } from './paths.mjs';
 
 const RECORD_PATH = path.join(BROWSER_DIR, 'dedicated.json');
@@ -132,9 +132,37 @@ async function main() {
   const port = Number.isInteger(record?.port) && record.port > 0 ? record.port : DEFAULT_PORT;
 
   if (!(await checkPort(port))) {
-    log(`专用实例未在运行（端口 ${port} 无监听）。`);
+    // 无端口 ≠ 无实例：占用 profile 但没开调试端口的实例正是**导致后续启动失败**的那类
+    // （Chrome 会把新启动参数交给它后自行退出 → 新实例永远等不到调试端口）。
+    // 旧版此处直接报「未在运行」并 exit 0，对这类实例完全无能为力——留下进程继续堵 profile。
+    const strays = pickProfileBrowserPids(listBrowserProcesses(), BROWSER_DIR);
+    if (strays.length === 0) {
+      log(`专用实例未在运行（端口 ${port} 无监听，也没有进程占用 profile）。`);
+      reportClear(clearRecord());
+      return 0;
+    }
+    log(`发现占用 profile 但未开放调试端口 ${port} 的实例（pid ${strays.join(', ')}），正在关闭…`);
     reportClear(clearRecord());
-    return 0;
+    let killed = 0;
+    for (const pid of strays) if (killPid(pid)) killed++;
+    if (killed > 0) {
+      log(`已终止 ${killed} 个占用进程。`);
+      // 主进程被杀后子进程会陆续退出；给它们一点时间再确认
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        if (pickProfileBrowserPids(listBrowserProcesses(), BROWSER_DIR).length === 0) break;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      const left = pickProfileBrowserPids(listBrowserProcesses(), BROWSER_DIR);
+      if (left.length === 0) {
+        log('占用已解除，可以重新启动专用实例。');
+        return 0;
+      }
+      log(`仍有进程占用 profile（pid ${left.join(', ')}），请手动结束它们。`);
+      return 1;
+    }
+    log('终止占用进程失败，请手动结束这些进程后重试。');
+    return 1;
   }
 
   log(`发现专用实例（端口 ${port}），正在关闭…`);

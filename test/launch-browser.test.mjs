@@ -4,7 +4,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectSignedInAccount, detectImportArtifacts, shouldRunImportCheck, collectPids } from '../scripts/launch-browser.mjs';
+import { detectSignedInAccount, detectImportArtifacts, shouldRunImportCheck, collectPids, classifyProfileOccupancy, occupancyMessage } from '../scripts/launch-browser.mjs';
+import { pickProfileBrowserPids } from '../scripts/browser-discovery.mjs';
 
 test('detectSignedInAccount：无 user_name → null（干净）', () => {
   const localState = JSON.stringify({
@@ -111,4 +112,74 @@ test('collectPids：不同 pid 都保留；null/undefined 过滤；顺序 record
   assert.deepEqual(collectPids(1234, null), [1234]);
   assert.deepEqual(collectPids(1234, 5678), [1234, 5678]);
   assert.deepEqual(collectPids(null, null), []);
+});
+
+// I3）启动前占用检测 —— classifyProfileOccupancy({ lockHeld, hasSingletonLock, strayBrowserCount })
+// 事故形态（2026-09-17 实测）：profile 被一个未开调试端口的 Chrome 占用时，Chrome 会把启动
+// 参数交给既有实例后自身退出 → 9222 永不监听、DevToolsActivePort 永不生成 → check-deps 干等
+// 60 秒后报「60 秒内专用实例未就绪」，把方向误导成「Chrome 起不来」。实际原因是被占用。
+// 三态：free（可启动）/ stale（有残留锁标记但无进程，可清理后启动）/ occupied（必须人工处理）。
+test('classifyProfileOccupancy：无锁无进程 → free', () => {
+  assert.equal(classifyProfileOccupancy({ lockHeld: false, hasSingletonLock: false, strayBrowserCount: 0 }), 'free');
+});
+
+test('classifyProfileOccupancy：有进程占用 → occupied（即使无锁标记）', () => {
+  assert.equal(classifyProfileOccupancy({ lockHeld: false, hasSingletonLock: false, strayBrowserCount: 2 }), 'occupied');
+});
+
+test('classifyProfileOccupancy：锁被持有 → occupied', () => {
+  assert.equal(classifyProfileOccupancy({ lockHeld: true, hasSingletonLock: false, strayBrowserCount: 0 }), 'occupied');
+});
+
+test('classifyProfileOccupancy：残留 SingletonLock 但无进程占用 → stale（可清理）', () => {
+  assert.equal(classifyProfileOccupancy({ lockHeld: false, hasSingletonLock: true, strayBrowserCount: 0 }), 'stale');
+});
+
+// 消息必须可操作：指向 close-browser.mjs，而不是让用户猜。
+test('occupancyMessage：occupied 提示指向 close-browser.mjs 且不误报为超时', () => {
+  const msg = occupancyMessage('occupied', 9222);
+  assert.match(msg, /close-browser\.mjs/);
+  assert.ok(!/60 秒/.test(msg), 'occupied 消息不应包含 60 秒超时字样');
+});
+
+test('occupancyMessage：stale 说明将自动清理', () => {
+  assert.match(occupancyMessage('stale', 9222), /清理/);
+});
+
+test('occupancyMessage：free → null（无需提示）', () => {
+  assert.equal(occupancyMessage('free', 9222), null);
+});
+
+// I4）从进程列表里挑出「持有本 profile 的浏览器主进程」——close-browser 关无端口实例时用。
+// 事故形态（2026-09-17 实测）：占用 profile 的实例可能**没开调试端口**，此时旧版 close-browser
+// 只看端口 9222 就报「未在运行」并 exit 0，留下 9 个 chrome 进程继续堵着 profile——
+// 即脚本对「导致启动失败的那类实例」恰好无能为力。需按命令行里的 profile 路径兜底识别。
+// 只认主进程：带 --type= 的是 renderer/gpu/utility 子进程，杀主进程即可连带回收，且避免误杀。
+test('pickProfileBrowserPids：挑出命令行含 profile 路径的主进程（排除 --type= 子进程）', () => {
+  const procs = [
+    { pid: 100, cmd: '"C:\\...\\chrome.exe" --user-data-dir=C:\\u\\.web-access\\browser --no-first-run' },
+    { pid: 101, cmd: 'chrome.exe --type=renderer --user-data-dir="C:\\u\\.web-access\\browser" --x' },
+    { pid: 102, cmd: 'chrome.exe --type=gpu-process --user-data-dir="C:\\u\\.web-access\\browser"' },
+  ];
+  assert.deepEqual(pickProfileBrowserPids(procs, 'C:\\u\\.web-access\\browser'), [100]);
+});
+
+test('pickProfileBrowserPids：不匹配其他 profile（含路径前缀相似的目录）', () => {
+  const procs = [
+    { pid: 200, cmd: 'chrome.exe --user-data-dir=C:\\Users\\linmu\\AppData\\Local\\Google\\Chrome\\User Data' },
+    { pid: 201, cmd: 'chrome.exe --user-data-dir=C:\\u\\.web-access\\browser-other' },
+  ];
+  assert.deepEqual(pickProfileBrowserPids(procs, 'C:\\u\\.web-access\\browser'), []);
+});
+
+test('pickProfileBrowserPids：引号包裹的路径也能识别；无匹配返回空数组', () => {
+  const procs = [
+    { pid: 300, cmd: 'chrome.exe --user-data-dir="C:\\u\\.web-access\\browser" --no-first-run' },
+  ];
+  assert.deepEqual(pickProfileBrowserPids(procs, 'C:\\u\\.web-access\\browser'), [300]);
+  assert.deepEqual(pickProfileBrowserPids([], 'C:\\u\\.web-access\\browser'), []);
+});
+
+test('pickProfileBrowserPids：cmd 缺失的行不抛错', () => {
+  assert.deepEqual(pickProfileBrowserPids([{ pid: 1 }, { pid: 2, cmd: null }], 'C:\\p'), []);
 });
